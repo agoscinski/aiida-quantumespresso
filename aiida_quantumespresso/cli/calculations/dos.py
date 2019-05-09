@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Command line scripts to launch a `PwCalculation` for testing and demonstration purposes."""
+"""Command line scripts to launch a `DosCalculation` for testing and demonstration purposes."""
 from __future__ import absolute_import
 import click
 
