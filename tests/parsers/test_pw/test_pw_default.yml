@@ -175,7 +175,5 @@ total_number_of_scf_iterations: 5
 volume: 40.02575174999999
 wall_time: '         1.86s '
 wall_time_seconds: 1.86
-warnings: []
 wfc_cutoff: 408.170751759
 wfc_cutoff_units: eV
-xml_warnings: []
