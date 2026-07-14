@@ -3,6 +3,7 @@ name: nightly
 on:
     schedule:
     -   cron: '0 0 * * *'  # Run every day at midnight
+    workflow_dispatch:
     push:
         paths:
         - '.github/workflows/nightly.yml'
@@ -28,10 +29,6 @@ jobs:
         services:
             postgres:
                 image: postgres:12
-            rabbitmq:
-                image: rabbitmq:latest
-                ports:
-                -   5672:5672
 
         steps:
         -   uses: actions/checkout@v4
@@ -42,10 +39,10 @@ jobs:
                 activate-environment: true
                 python-version: ${{ matrix.python-version }}
 
-        -   name: Install Python dependencies (with aiida-core@main)
+        -   name: Install Python dependencies
             id: install
             run: |
-                uv pip install -e .[tests] aiida-core[atomic_tools]@git+https://github.com/aiidateam/aiida-core@main
+                uv pip install -e .[tests]
 
         -   name: Run pytest
             id: tests
@@ -83,10 +80,6 @@ jobs:
                     POSTGRES_DB: postgres
                 ports:
                 -   5432:5432
-            rabbitmq:
-                image: rabbitmq:latest
-                ports:
-                -   5672:5672
 
         steps:
         -   uses: actions/checkout@v4
