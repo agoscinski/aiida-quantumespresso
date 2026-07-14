@@ -55,6 +55,10 @@ jobs:
         services:
             postgres:
                 image: postgres:12
+            rabbitmq:
+                image: rabbitmq:latest
+                ports:
+                -   5672:5672
 
         steps:
         -   uses: actions/checkout@v4
