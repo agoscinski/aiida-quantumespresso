@@ -159,7 +159,7 @@ def test_static_pseudos_container_provenance(monkeypatch, aiida_code_installed) 
         pseudos=pseudos,
         parameters={'CONTROL': {}, 'SYSTEM': {}, 'ELECTRONS': {'diagonalization': 'cg'}},
         kpoints=_kpoints(),
-        task_metadata={'pw_calc': {'options': {}}, 'pw_calc_2': {'options': {}}},
+        task_metadata={'pw_calc': {'options': {}}},
     )
     assert node.is_finished_ok, node.exit_message
     assert outputs['report'].get_dict() == {'attempts': 1, 'status': 'finished'}

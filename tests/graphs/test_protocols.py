@@ -146,10 +146,10 @@ def test_pw_protocol_inputs_expose_relax_bands_keys() -> None:
     assert bands['bands_kpoints_distance'] == 0.1
 
 
-def test_task_metadata_for_options_skips_empty() -> None:
-    """Empty placements are left out of the launch mapping."""
+def test_task_metadata_for_options_preserves_empty_leaves() -> None:
+    """An empty leaf requests default CalcJob metadata; only explicit None is omitted."""
     assert protocols.task_metadata_for_options() == {}
-    assert protocols.task_metadata_for_options(pw_calc=None, dos_calc={}) == {}
+    assert protocols.task_metadata_for_options(pw_calc=None, dos_calc={}) == {'dos_calc': {}}
     mapping = protocols.task_metadata_for_options(
         pw_calc={'options': {'max_wallclock_seconds': 3600}},
         dos_calc={'options': {'withmpi': True}},
@@ -158,6 +158,11 @@ def test_task_metadata_for_options_skips_empty() -> None:
         'pw_calc': {'options': {'max_wallclock_seconds': 3600}},
         'dos_calc': {'options': {'withmpi': True}},
     }
+    scoped = protocols.task_metadata_for_options(
+        scf={'pw_calc': {'options': {'max_wallclock_seconds': 1111}}},
+        bands=None,
+    )
+    assert scoped == {'scf': {'pw_calc': {'options': {'max_wallclock_seconds': 1111}}}}
 
 
 def test_pdos_protocol_task_metadata_lifts_options() -> None:
@@ -207,7 +212,49 @@ def test_launch_relax_explicit_pseudos(aiida_code_installed, generate_upf_data) 
     assert launch['kpoints_distance'].value == pytest.approx(0.15)
     assert launch['run_init_relax'] is True
     assert launch['pseudos']['Si'].z_valence == 4.0
-    assert launch['task_metadata']['pw_calc']['options']['max_wallclock_seconds'] == 43200
+    assert launch['task_metadata']['main']['pw_calc']['options']['max_wallclock_seconds'] == 43200
+    assert (
+        launch['task_metadata']['init_relax_guarded']['initial']['pw_calc']['options']['max_wallclock_seconds'] == 43200
+    )
+
+
+def test_launch_relax_init_main_options_resolve_per_scope(monkeypatch, aiida_code_installed, generate_upf_data) -> None:
+    """Initial and main scheduler options reach separate real CalcJob placements."""
+    _patch_nested(monkeypatch, pw_stub=SuccessPwCalc)
+    code = aiida_code_installed(label='test.proto-relax-scoped', default_calc_job_plugin='quantumespresso.pw')
+    overrides = _cutoff_overrides(30.0, 240.0, 'base_relax', 'base_init_relax')
+    overrides['base_relax']['pw']['metadata'] = {'options': {'max_wallclock_seconds': 2222}}
+    overrides['base_init_relax']['pw']['metadata'] = {'options': {'max_wallclock_seconds': 1111}}
+    launch = protocols.get_inputs_from_protocol(
+        'pw_relax',
+        structure=_silicon(),
+        code=code,
+        pseudos={'Si': generate_upf_data('Si')},
+        overrides=overrides,
+    )
+    task_metadata = launch['task_metadata']
+    assert task_metadata['init_relax_guarded']['initial']['pw_calc']['options']['max_wallclock_seconds'] == 1111
+    assert task_metadata['main']['pw_calc']['options']['max_wallclock_seconds'] == 2222
+    _, root = run_get_node(pw_relax_graph, **launch)
+    assert root.is_finished_ok, root.exit_message
+    children = sorted(_pw_calcs(root), key=lambda child: child.ctime)
+    assert len(children) == 2
+    assert [child.get_option('max_wallclock_seconds') for child in children] == [1111, 2222]
+
+
+@pytest.mark.parametrize('bad_metadata', [[], {'main': []}])
+def test_protocol_rejects_non_mapping_metadata(aiida_code_installed, bad_metadata) -> None:
+    """Malformed overrides receive a boundary error rather than an internal merge failure."""
+    code = aiida_code_installed(label='test.bad-metadata', default_calc_job_plugin='quantumespresso.pw')
+    with pytest.raises(ValueError, match='task_metadata'):
+        protocols.get_inputs_from_protocol(
+            'pw_relax',
+            structure=_silicon(),
+            code=code,
+            pseudos={'Si': _upf()},
+            overrides=_cutoff_overrides(30.0, 240.0, 'base_relax', 'base_init_relax'),
+            task_metadata=bad_metadata,
+        )
 
 
 def test_launch_relax_family_cutoffs(aiida_code_installed, generate_silicon_pseudo_family) -> None:
@@ -335,7 +382,7 @@ def test_launch_inputs_do_not_mutate_callers(aiida_code_installed) -> None:
 
 
 def test_launch_bands_inputs(aiida_code_installed) -> None:
-    """The bands resolver splits SCF/bands parameters and emits hierarchical metadata aliases."""
+    """The bands resolver splits SCF/bands parameters and emits nested scope metadata."""
     code = aiida_code_installed(label='test.proto-bands-pw', default_calc_job_plugin='quantumespresso.pw')
     launch = protocols.get_inputs_from_protocol(
         'pw_bands',
@@ -351,9 +398,10 @@ def test_launch_bands_inputs(aiida_code_installed) -> None:
     assert launch['nbands_factor'].value == pytest.approx(3.0)
     assert launch['scf_parameters'].get_dict()['SYSTEM']['ecutwfc'] == 30.0
     task_metadata = launch['task_metadata']
-    assert task_metadata['pw_calc']['options']['max_wallclock_seconds'] == 43200
-    assert task_metadata['pw_base_graph__pw_calc'] == task_metadata['pw_calc']
-    assert task_metadata['pw_base_graph_2__pw_calc']['options']['max_wallclock_seconds'] == 43200
+    assert set(task_metadata) == {'scf', 'bands'}
+    for scope in ('scf', 'bands'):
+        assert set(task_metadata[scope]) == {'pw_calc'}
+        assert task_metadata[scope]['pw_calc']['options']['max_wallclock_seconds'] == 43200
 
 
 def test_launch_bands_kpoints_conflict(aiida_code_installed) -> None:
@@ -394,9 +442,17 @@ def test_launch_pdos_inputs(aiida_code_installed) -> None:
     assert launch['nscf_kpoints_distance'].value == pytest.approx(0.10)
     assert launch['dos_parameters'].get_dict()['DOS']['deltae'] == pytest.approx(0.01)
     task_metadata = launch['task_metadata']
-    assert task_metadata['dos_calc']['options']['max_wallclock_seconds'] == 43200
-    assert task_metadata['pdos_stage_parallel__dos_calc'] == task_metadata['dos_calc']
-    assert task_metadata['pdos_stage_parallel__pw_base_graph__pw_calc']['options']['max_wallclock_seconds'] == 43200
+    assert set(task_metadata) == {'scf', 'pdos_stage_parallel'}
+    assert set(task_metadata['scf']) == {'pw_calc'}
+    assert set(task_metadata['pdos_stage_parallel']) == {'nscf', 'dos_calc', 'projwfc_calc'}
+    assert set(task_metadata['pdos_stage_parallel']['nscf']) == {'pw_calc'}
+    for leaf in (
+        task_metadata['scf']['pw_calc'],
+        task_metadata['pdos_stage_parallel']['nscf']['pw_calc'],
+        task_metadata['pdos_stage_parallel']['dos_calc'],
+        task_metadata['pdos_stage_parallel']['projwfc_calc'],
+    ):
+        assert leaf['options']['max_wallclock_seconds'] == 43200
     serial = protocols.get_inputs_from_protocol(
         'pdos',
         structure=_silicon(),
@@ -407,7 +463,8 @@ def test_launch_pdos_inputs(aiida_code_installed) -> None:
         serial=True,
         overrides=_cutoff_overrides(30.0, 240.0, 'scf', 'nscf'),
     )
-    assert 'pdos_stage_serial__dos_calc' in serial['task_metadata']
+    assert serial['task_metadata']['pdos_stage_serial']['dos_calc']['options']['max_wallclock_seconds'] == 43200
+    assert 'scf' in serial['task_metadata']
 
 
 @pytest.mark.parametrize('kind', ['pw_relax', 'pw_bands'])
@@ -495,8 +552,8 @@ def test_launch_bands_per_scope_options(monkeypatch, aiida_code_installed) -> No
         pseudos={'Si': _upf()},
         overrides=_cutoff_overrides(30.0, 240.0, 'scf', 'bands'),
         task_metadata={
-            'pw_base_graph__pw_calc': {'options': {'max_wallclock_seconds': 1111}},
-            'pw_base_graph_2__pw_calc': {'options': {'max_wallclock_seconds': 2222}},
+            'scf': {'pw_calc': {'options': {'max_wallclock_seconds': 1111}}},
+            'bands': {'pw_calc': {'options': {'max_wallclock_seconds': 2222}}},
         },
     )
     outputs, node = run_get_node(pw_bands_graph, **launch)

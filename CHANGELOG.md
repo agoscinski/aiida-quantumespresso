@@ -25,6 +25,13 @@
 
 ### Breaking changes (experimental graph API only)
 
+* `task_metadata` is now nested by authored graph-call names, with normal CalcJob
+  metadata at the leaves. Native graph aliases (`scf`, `nscf`, `bands`, `initial`,
+  `main`) distinguish reused base graphs. Flat nested-task keys, provenance-label
+  keys, wildcard scopes, and generated suffix addresses are no longer used.
+  Protocol helpers emit the new shape; initial and main relaxation scheduler
+  options now resolve independently. Loops and branches add no mapping level.
+
 * `workflows.graphs.base.pw_base_graph` and `neb_base_graph` now accept
   `pseudos: DataDict` instead of a fixed single-kind `pseudo`, place CalcJobs
   directly, and accept an initial `parent_folder`. `NebStaticWrapper` and

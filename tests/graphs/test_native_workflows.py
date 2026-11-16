@@ -28,8 +28,11 @@ production bodies recompile against the substitutes. No production graph is
 copied here.
 
 Scheduler options for the ``CalcJob`` placements travel at launch under
-``task_metadata`` keyed by placement name (``pw_calc`` / ``dos_calc`` /
-``projwfc_calc``), not through graph inputs.
+``task_metadata`` as a strictly nested mapping (one level per authored
+subgraph callee alias, the ``CalcJob`` placement alias at each leaf), not
+through graph inputs: ``{'scf': {'pw_calc': ...}, 'bands': {'pw_calc': ...}}``
+for bands, ``{'init_relax_guarded': {'initial': {'pw_calc': ...}}, 'main':
+{'pw_calc': ...}}`` for relax, and the ``scf`` plus stage scopes for PDOS.
 """
 
 import io
@@ -317,7 +320,10 @@ def test_native_relax_converged_full_nesting(monkeypatch, aiida_code_installed) 
         max_iterations=5,
         meta_convergence=True,
         kpoints=_kpoints(),
-        task_metadata={'pw_calc': {'options': {}}},
+        task_metadata={
+            'init_relax_guarded': {'initial': {'pw_calc': {'options': {}}}},
+            'main': {'pw_calc': {'options': {}}},
+        },
     )
     assert node.is_finished_ok, node.exit_message
     assert outputs['report'].get_dict()['status'] == 'converged'
@@ -342,7 +348,10 @@ def test_native_bands_seekpath_full_nesting(monkeypatch, aiida_code_installed) -
         pseudos=pseudos,
         scf_kpoints_distance=Float(0.5),
         bands_kpoints_distance=Float(0.3),
-        task_metadata={'pw_calc': {'options': {}}},
+        task_metadata={
+            'scf': {'pw_calc': {'options': {}}},
+            'bands': {'pw_calc': {'options': {}}},
+        },
     )
     assert node.is_finished_ok, node.exit_message
     assert isinstance(outputs['band_structure'], BandsData)
@@ -382,7 +391,14 @@ def test_native_pdos_serial_full_nesting_and_order(monkeypatch, aiida_code_insta
         scf_kpoints_distance=Float(0.5),
         nscf_kpoints_distance=Float(0.5),
         clean_workdir=True,
-        task_metadata={'pw_calc': {'options': {}}, 'dos_calc': {'options': {}}, 'projwfc_calc': {'options': {}}},
+        task_metadata={
+            'scf': {'pw_calc': {'options': {}}},
+            'pdos_stage_serial': {
+                'nscf': {'pw_calc': {'options': {}}},
+                'dos_calc': {'options': {}},
+                'projwfc_calc': {'options': {}},
+            },
+        },
     )
     assert node.is_finished_ok, node.exit_message
     assert outputs['report']['mode'] == 'serial'
@@ -420,7 +436,10 @@ def test_native_relax_output_identity(monkeypatch, aiida_code_installed) -> None
         pseudos=_pseudos('Si'),
         max_iterations=5,
         kpoints=_kpoints(),
-        task_metadata={'pw_calc': {'options': {}}},
+        task_metadata={
+            'init_relax_guarded': {'initial': {'pw_calc': {'options': {}}}},
+            'main': {'pw_calc': {'options': {}}},
+        },
     )
     assert node.is_finished_ok, node.exit_message
     assert node.base.links.get_outgoing(link_type=LinkType.CREATE).all() == []

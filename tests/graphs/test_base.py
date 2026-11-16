@@ -15,8 +15,10 @@ localhost, and decide their exit status from the carried parameters in an overri
 until a charge-density restart arrives. Failed runs store the same outputs a real
 failure would, so the production retry loop, rebinding, and ``require_*`` guards
 execute for real. Scheduler options for the ``CalcJob`` placements travel under
-``task_metadata`` keyed by placement name (``pw_calc``/``pw_calc_2``,
-``neb_calc``/``neb_calc_2``). ``pseudos`` travel as a general ``DataDict`` mapping
+``task_metadata`` as a nested mapping with one ``pw_calc``/``neb_calc`` scope:
+the first attempt and every retry share the placement's configuration (loop
+control is transparent, so no suffixed or per-iteration key exists).
+``pseudos`` travel as a general ``DataDict`` mapping
 kind names onto ``UpfData`` nodes (one entry per structure kind).
 """
 
@@ -275,13 +277,13 @@ def _substitute(monkeypatch, stub, name, errors):
 
 
 def _pw_metadata() -> dict:
-    """Return the launch metadata both ``pw`` placements need."""
-    return {'pw_calc': {'options': {}}, 'pw_calc_2': {'options': {}}}
+    """Return the launch metadata the ``pw`` placement needs."""
+    return {'pw_calc': {'options': {}}}
 
 
 def _neb_metadata() -> dict:
-    """Return the launch metadata both ``neb`` placements need."""
-    return {'neb_calc': {'options': {}}, 'neb_calc_2': {'options': {}}}
+    """Return the launch metadata the ``neb`` placement needs."""
+    return {'neb_calc': {'options': {}}}
 
 
 def test_build_validates_all_base_graphs() -> None:

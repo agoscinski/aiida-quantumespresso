@@ -3,10 +3,10 @@
 # This file is part of the AiiDA code.                                    #
 #                                                                         #
 # The code is hosted on GitHub at https://github.com/aiidateam/aiida-core #
-# For further information on the license, see the LICENSE.txt file        #
+# For further information on the license, see the LICENSE.txt file      #
 # For further information please visit http://www.aiida.net               #
 ############################################################################
-"""Independent round-3 integration: retries, scope metadata, and monitor threading.
+"""Iteration-2 integration: nested ``task_metadata``, retries, and monitor threading.
 
 Run from the parent core checkout with the QE dependencies installed::
 
@@ -14,14 +14,18 @@ Run from the parent core checkout with the QE dependencies installed::
         pytest aiida-quantumespresso/tests/graphs/test_round3_integration.py -q
 
 What this proves (and nothing else does): the production composites forward an
-optional shared ``monitors`` mapping into every nested ``pw_base_graph`` *and*
-independent per-stage scheduler options survive base-graph retries. Every test
-runs a production root (``pw_bands_graph`` / ``pdos_from_scratch_serial`` /
-``pw_relax_graph``) through the production ``pw_base_graph`` retry loops with
-only the external ``CalcJob`` placements substituted by deterministic local
-stubs. No production graph is copied here; the substitution reuses the
-``_patch_nested`` helper from ``test_native_workflows`` (which already carries
-the ``monitors`` placement shape).
+optional shared ``monitors`` mapping into every nested base run *and*
+independent per-stage scheduler options survive base-graph retries under the
+strictly nested ``task_metadata`` contract (one level per authored subgraph
+callee alias, the ``CalcJob`` metadata mapping at each leaf, control frames
+transparent). Every test runs a production root (``pw_bands_graph`` /
+``pdos_from_scratch_serial`` / ``pw_relax_graph``) through the production
+``pw_base_graph`` retry loops with only the external ``CalcJob`` placements
+substituted by deterministic local stubs. No production graph is copied here;
+the substitution reuses the ``_patch_nested`` helper from
+``test_native_workflows`` (which already carries the ``monitors`` placement
+shape). Exact hierarchical aliases, ``__*`` scope wildcards, and leaf-name
+fallbacks are gone: the tests below pass only nested mappings.
 """
 
 import io
@@ -58,7 +62,7 @@ def _upf(element: str = 'Si'):
     from aiida.plugins import DataFactory
 
     UpfData = DataFactory('pseudo.upf')
-    content = f'<UPF version="2.0.1"><PP_HEADER\\nelement="{element}"\\nz_valence="4.0"\\n/></UPF>\\n'
+    content = f'<UPF version="2.0.1"><PP_HEADER\nelement="{element}"\nz_valence="4.0"\n/></UPF>\n'
     return UpfData(io.BytesIO(content.encode('utf-8')), filename=f'{element}.upf')
 
 
@@ -126,7 +130,7 @@ class RetryWalltimeBandsPwCalc(PwCalculation):
 
 
 def test_bands_retry_keeps_independent_scope_options(monkeypatch, aiida_code_installed) -> None:
-    """SCF and bands retries each keep their own scope-rule scheduler options."""
+    """SCF and bands retries each keep their own nested scope scheduler options."""
     _patch_nested(monkeypatch, pw_stub=RetryWalltimeBandsPwCalc)
     scf_code = aiida_code_installed(label='test.r3-bands-scf', default_calc_job_plugin='quantumespresso.pw')
     bands_code = aiida_code_installed(label='test.r3-bands-bands', default_calc_job_plugin='quantumespresso.pw')
@@ -141,8 +145,8 @@ def test_bands_retry_keeps_independent_scope_options(monkeypatch, aiida_code_ins
         scf_kpoints_distance=Float(0.5),
         bands_kpoints_distance=Float(0.3),
         task_metadata={
-            'pw_base_graph__*': {'options': {'max_wallclock_seconds': 1111}},
-            'pw_base_graph_2__*': {'options': {'max_wallclock_seconds': 2222}},
+            'scf': {'pw_calc': {'options': {'max_wallclock_seconds': 1111}}},
+            'bands': {'pw_calc': {'options': {'max_wallclock_seconds': 2222}}},
         },
     )
     assert node.is_finished_ok, node.exit_message
@@ -157,32 +161,78 @@ def test_bands_retry_keeps_independent_scope_options(monkeypatch, aiida_code_ins
     assert by_role == {'scf': {1111}, 'bands': {2222}}, by_role
 
 
-def test_bands_exact_aliases_still_cover_first_attempt(monkeypatch, aiida_code_installed) -> None:
-    """Exact hierarchical aliases keep working for the first attempt of each stage."""
+def test_bands_missing_scope_entry_fails_loudly(monkeypatch, aiida_code_installed) -> None:
+    """A missing nested scope entry fails loudly instead of running with defaults."""
+    from aiida.common.exceptions import GraphValidationError
+
     _patch_nested(monkeypatch, pw_stub=RetryWalltimeBandsPwCalc)
-    scf_code = aiida_code_installed(label='test.r3-bands-exact-scf', default_calc_job_plugin='quantumespresso.pw')
-    bands_code = aiida_code_installed(label='test.r3-bands-exact-b', default_calc_job_plugin='quantumespresso.pw')
-    outputs, node = run_get_node(
-        pw_bands_graph,
-        structure=_silicon(),
-        scf_parameters=Dict({'CONTROL': {'calculation': 'scf'}, 'SYSTEM': {}, 'ELECTRONS': {}}),
-        bands_parameters=Dict({'CONTROL': {'calculation': 'bands'}, 'SYSTEM': {}}),
-        scf_code=scf_code,
-        bands_code=bands_code,
-        pseudos=_pseudos('Si'),
-        scf_kpoints_distance=Float(0.5),
-        bands_kpoints_distance=Float(0.3),
-        task_metadata={
-            'pw_calc': {'options': {'max_wallclock_seconds': 10}},
-            'pw_base_graph__pw_calc': {'options': {'max_wallclock_seconds': 1111}},
-            'pw_base_graph_2__pw_calc': {'options': {'max_wallclock_seconds': 2222}},
-            'pw_base_graph__*': {'options': {'max_wallclock_seconds': 1111}},
-            'pw_base_graph_2__*': {'options': {'max_wallclock_seconds': 2222}},
-        },
-    )
-    assert node.is_finished_ok, node.exit_message
-    assert isinstance(outputs['band_structure'], BandsData)
-    assert len(_pw_calcs(node)) == 4
+    scf_code = aiida_code_installed(label='test.r3-bands-missing-scf', default_calc_job_plugin='quantumespresso.pw')
+    bands_code = aiida_code_installed(label='test.r3-bands-missing-b', default_calc_job_plugin='quantumespresso.pw')
+    with pytest.raises(GraphValidationError, match='bands'):
+        run_get_node(
+            pw_bands_graph,
+            structure=_silicon(),
+            scf_parameters=Dict({'CONTROL': {'calculation': 'scf'}, 'SYSTEM': {}, 'ELECTRONS': {}}),
+            bands_parameters=Dict({'CONTROL': {'calculation': 'bands'}, 'SYSTEM': {}}),
+            scf_code=scf_code,
+            bands_code=bands_code,
+            pseudos=_pseudos('Si'),
+            scf_kpoints_distance=Float(0.5),
+            bands_kpoints_distance=Float(0.3),
+            task_metadata={
+                'scf': {'pw_calc': {'options': {'max_wallclock_seconds': 1111}}},
+            },
+        )
+
+
+def test_bands_misspelled_scope_rejected(monkeypatch, aiida_code_installed) -> None:
+    """A misspelled scope path fails loudly naming the unknown path."""
+    from aiida.common.exceptions import GraphValidationError
+
+    _patch_nested(monkeypatch, pw_stub=RetryWalltimeBandsPwCalc)
+    scf_code = aiida_code_installed(label='test.r3-bands-typo-scf', default_calc_job_plugin='quantumespresso.pw')
+    bands_code = aiida_code_installed(label='test.r3-bands-typo-b', default_calc_job_plugin='quantumespresso.pw')
+    with pytest.raises(GraphValidationError, match='bandz'):
+        run_get_node(
+            pw_bands_graph,
+            structure=_silicon(),
+            scf_parameters=Dict({'CONTROL': {'calculation': 'scf'}, 'SYSTEM': {}, 'ELECTRONS': {}}),
+            bands_parameters=Dict({'CONTROL': {'calculation': 'bands'}, 'SYSTEM': {}}),
+            scf_code=scf_code,
+            bands_code=bands_code,
+            pseudos=_pseudos('Si'),
+            scf_kpoints_distance=Float(0.5),
+            bands_kpoints_distance=Float(0.3),
+            task_metadata={
+                'scf': {'pw_calc': {'options': {}}},
+                'bandz': {'pw_calc': {'options': {}}},
+            },
+        )
+
+
+def test_bands_malformed_leaf_rejected(monkeypatch, aiida_code_installed) -> None:
+    """A non-mapping leaf fails loudly naming the offending path."""
+    from aiida.common.exceptions import GraphValidationError
+
+    _patch_nested(monkeypatch, pw_stub=RetryWalltimeBandsPwCalc)
+    scf_code = aiida_code_installed(label='test.r3-bands-malformed-scf', default_calc_job_plugin='quantumespresso.pw')
+    bands_code = aiida_code_installed(label='test.r3-bands-malformed-b', default_calc_job_plugin='quantumespresso.pw')
+    with pytest.raises(GraphValidationError, match='pw_calc'):
+        run_get_node(
+            pw_bands_graph,
+            structure=_silicon(),
+            scf_parameters=Dict({'CONTROL': {'calculation': 'scf'}, 'SYSTEM': {}, 'ELECTRONS': {}}),
+            bands_parameters=Dict({'CONTROL': {'calculation': 'bands'}, 'SYSTEM': {}}),
+            scf_code=scf_code,
+            bands_code=bands_code,
+            pseudos=_pseudos('Si'),
+            scf_kpoints_distance=Float(0.5),
+            bands_kpoints_distance=Float(0.3),
+            task_metadata={
+                'scf': {'pw_calc': {'options': {}}},
+                'bands': {'pw_calc': ['not-a-mapping']},
+            },
+        )
 
 
 def test_bands_monitors_reach_nested_calcs(monkeypatch, aiida_code_installed) -> None:
@@ -203,8 +253,8 @@ def test_bands_monitors_reach_nested_calcs(monkeypatch, aiida_code_installed) ->
         bands_kpoints_distance=Float(0.3),
         monitors=monitors,
         task_metadata={
-            'pw_base_graph__*': {'options': {}},
-            'pw_base_graph_2__*': {'options': {}},
+            'scf': {'pw_calc': {'options': {}}},
+            'bands': {'pw_calc': {'options': {}}},
         },
     )
     assert node.is_finished_ok, node.exit_message
@@ -232,8 +282,8 @@ def test_bands_per_stage_monitors(monkeypatch, aiida_code_installed) -> None:
         monitors=_monitors(),
         bands_monitors=_monitors(min_repeats=3),
         task_metadata={
-            'pw_base_graph__*': {'options': {}},
-            'pw_base_graph_2__*': {'options': {}},
+            'scf': {'pw_calc': {'options': {}}},
+            'bands': {'pw_calc': {'options': {}}},
         },
     )
     assert node.is_finished_ok, node.exit_message
@@ -258,7 +308,10 @@ def test_relax_monitors_thread_through(monkeypatch, aiida_code_installed) -> Non
         max_iterations=2,
         kpoints=_kpoints(),
         monitors=_monitors(),
-        task_metadata={'pw_calc': {'options': {}}, 'pw_base_graph__*': {'options': {}}},
+        task_metadata={
+            'init_relax_guarded': {'initial': {'pw_calc': {'options': {}}}},
+            'main': {'pw_calc': {'options': {}}},
+        },
     )
     assert node.is_finished_ok, node.exit_message
     assert outputs['report'].get_dict()['status'] == 'converged'
@@ -276,7 +329,7 @@ def _kpoints() -> KpointsData:
 
 
 def test_pdos_retry_keeps_nscf_scope_options(monkeypatch, aiida_code_installed) -> None:
-    """PDOS NSCF retries keep their stage scope-rule options."""
+    """PDOS SCF/NSCF retries keep their own nested scope scheduler options."""
     _patch_nested(monkeypatch, pw_stub=RetryWalltimeBandsPwCalc, dos_stub=StubDosCalc, projwfc_stub=StubProjwfcCalc)
     pw_code = aiida_code_installed(label='test.r3-pdos-pw', default_calc_job_plugin='quantumespresso.pw')
     dos_code = aiida_code_installed(label='test.r3-pdos-dos', default_calc_job_plugin='quantumespresso.dos')
@@ -302,10 +355,12 @@ def test_pdos_retry_keeps_nscf_scope_options(monkeypatch, aiida_code_installed) 
         nscf_kpoints_distance=Float(0.5),
         monitors=_monitors(),
         task_metadata={
-            'pw_base_graph__*': {'options': {'max_wallclock_seconds': 1111}},
-            'pdos_stage_serial__pw_base_graph__*': {'options': {'max_wallclock_seconds': 2222}},
-            'pdos_stage_serial__dos_calc': {'options': {}},
-            'pdos_stage_serial__projwfc_calc': {'options': {}},
+            'scf': {'pw_calc': {'options': {'max_wallclock_seconds': 1111}}},
+            'pdos_stage_serial': {
+                'nscf': {'pw_calc': {'options': {'max_wallclock_seconds': 2222}}},
+                'dos_calc': {'options': {}},
+                'projwfc_calc': {'options': {}},
+            },
         },
     )
     assert node.is_finished_ok, node.exit_message
@@ -324,8 +379,8 @@ def test_pdos_retry_keeps_nscf_scope_options(monkeypatch, aiida_code_installed) 
     assert nscf_values == {2222}, nscf_values
 
 
-def test_protocol_bands_scope_rules_and_monitors(aiida_code_installed) -> None:
-    """The bands resolver emits scope rules plus exact aliases and wires YAML monitors."""
+def test_protocol_bands_nested_scopes_and_monitors(aiida_code_installed) -> None:
+    """The bands resolver emits nested SCF/bands scopes and wires YAML monitors."""
     code = aiida_code_installed(label='test.r3-proto-bands', default_calc_job_plugin='quantumespresso.pw')
     launch = protocols.get_inputs_from_protocol(
         'pw_bands',
@@ -349,9 +404,10 @@ def test_protocol_bands_scope_rules_and_monitors(aiida_code_installed) -> None:
         },
     )
     task_metadata = launch['task_metadata']
-    assert task_metadata['pw_base_graph__*']['options']['max_wallclock_seconds'] == 43200
-    assert task_metadata['pw_base_graph_2__*']['options']['max_wallclock_seconds'] == 43200
-    assert task_metadata['pw_base_graph__pw_calc'] == task_metadata['pw_base_graph__*']
+    assert set(task_metadata) == {'scf', 'bands'}
+    for scope in ('scf', 'bands'):
+        assert set(task_metadata[scope]) == {'pw_calc'}
+        assert task_metadata[scope]['pw_calc']['options']['max_wallclock_seconds'] == 43200
     assert 'scf_monitors' in launch or 'monitors' in launch
     monitors_node = launch.get('scf_monitors', launch.get('monitors'))
     assert isinstance(monitors_node, DataDict)
@@ -460,8 +516,8 @@ def test_protocol_rejects_unsupported_monitors_shape(aiida_code_installed) -> No
         )
 
 
-def test_protocol_pdos_scope_rules(aiida_code_installed) -> None:
-    """The PDOS resolver emits stage scope rules covering first and retry runs."""
+def test_protocol_pdos_nested_scopes(aiida_code_installed) -> None:
+    """The PDOS resolver emits the stage scope with nested SCF/NSCF/post-processing entries."""
     code = aiida_code_installed(label='test.r3-proto-pdos', default_calc_job_plugin='quantumespresso.pw')
     launch = protocols.get_inputs_from_protocol(
         'pdos',
@@ -477,12 +533,17 @@ def test_protocol_pdos_scope_rules(aiida_code_installed) -> None:
         },
     )
     task_metadata = launch['task_metadata']
-    assert task_metadata['pw_base_graph__*']['options']['max_wallclock_seconds'] == 43200
-    assert task_metadata['pdos_stage_serial__pw_base_graph__*']['options']['max_wallclock_seconds'] == 43200
-    assert (
-        task_metadata['pdos_stage_serial__pw_base_graph__pw_calc']
-        == task_metadata['pdos_stage_serial__pw_base_graph__*']
-    )
+    assert set(task_metadata) == {'scf', 'pdos_stage_serial'}
+    assert set(task_metadata['scf']) == {'pw_calc'}
+    assert set(task_metadata['pdos_stage_serial']) == {'nscf', 'dos_calc', 'projwfc_calc'}
+    assert set(task_metadata['pdos_stage_serial']['nscf']) == {'pw_calc'}
+    for leaf in (
+        task_metadata['scf']['pw_calc'],
+        task_metadata['pdos_stage_serial']['nscf']['pw_calc'],
+        task_metadata['pdos_stage_serial']['dos_calc'],
+        task_metadata['pdos_stage_serial']['projwfc_calc'],
+    ):
+        assert leaf['options']['max_wallclock_seconds'] == 43200
 
 
 def test_graph_root_nodes_are_native(monkeypatch, aiida_code_installed) -> None:
@@ -503,8 +564,8 @@ def test_graph_root_nodes_are_native(monkeypatch, aiida_code_installed) -> None:
         scf_kpoints_distance=Float(0.5),
         bands_kpoints_distance=Float(0.3),
         task_metadata={
-            'pw_base_graph__*': {'options': {}},
-            'pw_base_graph_2__*': {'options': {}},
+            'scf': {'pw_calc': {'options': {}}},
+            'bands': {'pw_calc': {'options': {}}},
         },
     )
     assert node.is_finished_ok, node.exit_message

@@ -78,8 +78,12 @@ def _incoming_labels(node) -> list:
 
 
 def _pw_metadata() -> dict:
-    """Return the launch metadata both ``pw`` placements need."""
-    return {'pw_calc': {'options': {}}, 'pw_calc_2': {'options': {}}}
+    """Return the launch metadata the ``pw`` placement needs.
+
+    The first attempt and every retry share one ``pw_calc`` scope: loop
+    control is transparent, so no suffixed or per-iteration key exists.
+    """
+    return {'pw_calc': {'options': {}}}
 
 
 class _MonitorStubBase(PwCalculation):

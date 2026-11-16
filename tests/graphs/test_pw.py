@@ -154,15 +154,17 @@ def stub_pw_base(
 
 
 def _substitute_pw_base(monkeypatch) -> None:
-    """Replace the native ``pw_base_graph`` placement with the ``@task`` stub.
+    """Replace the native base placements with the ``@task`` stub.
 
-    The production graphs resolve placements by module-level name at
-    compilation, so patching ``pw_module.pw_base_graph`` redirects the real
-    orchestration without copying its body. Compiled templates are cached on
-    the graph handles, so they are reset (restored afterwards by
-    ``monkeypatch``) to force recompilation against the substitute.
+    The production graphs resolve placements by module-level alias name at
+    compilation, so patching each authored alias (``scf``/``bands``/``initial``/
+    ``main``) redirects the real orchestration without copying its body.
+    Compiled templates are cached on the graph handles, so they are reset
+    (restored afterwards by ``monkeypatch``) to force recompilation against
+    the substitute.
     """
-    monkeypatch.setattr(pw_module, 'pw_base_graph', stub_pw_base)
+    for alias in ('scf', 'bands', 'initial', 'main'):
+        monkeypatch.setattr(pw_module, alias, stub_pw_base)
     for handle in (pw_module.pw_relax_graph, pw_module.pw_bands_graph, pw_module.init_relax_guarded):
         monkeypatch.setattr(handle, '_template', None)
 
@@ -177,31 +179,68 @@ def test_build_bands_graph() -> None:
     assert pw_bands_graph.build() is None
 
 
-def test_native_placement_needs_task_metadata() -> None:
-    """The relax graph places the native base subgraph under its agreed name."""
-    from aiida.engine.processes.graphs.ir import LoopControl, SubgraphTask
+def _calcjob_paths(template) -> set:
+    """Return every ``CalcJob`` placement path of a compiled template.
+
+    Each path descends one level per authored subgraph callee alias and ends
+    at the ``CalcJob`` placement alias; branch and loop control frames are
+    transparent and contribute no level of their own.
+    """
+    from aiida.engine import CalcJob
+    from aiida.engine.processes.graphs.ir import BranchControl, LoopControl, ProcessTask, SubgraphTask
+
+    found = set()
+
+    def _visit(current, scope: tuple) -> None:
+        if isinstance(current, ProcessTask):
+            if issubclass(current.spec.process_class, CalcJob):
+                found.add((*scope, current.name))
+        elif isinstance(current, SubgraphTask):
+            for nested in current.body.tasks:
+                _visit(nested, (*scope, current.name))
+        elif isinstance(current, BranchControl):
+            for body in current.branches:
+                for nested in body.tasks:
+                    _visit(nested, scope)
+        elif isinstance(current, LoopControl):
+            for nested in current.body.tasks:
+                _visit(nested, scope)
+
+    for current in template.tasks:
+        _visit(current, ())
+    return found
+
+
+def test_relax_scopes_follow_authored_aliases() -> None:
+    """The compiled relax graph addresses base runs through ``initial``/``main``.
+
+    The check compiles the production graphs themselves (no copies): the
+    initial branch nests the ``initial`` base alias inside the
+    ``init_relax_guarded`` wrapper scope, the main loop places ``main`` with
+    no generated suffix, and no placement calls ``pw_base_graph`` directly.
+    """
     from aiida.engine.processes.graphs.lowering import compile_graph
 
-    def _subgraphs(template) -> list:
-        """Return every subgraph task of a template, including loop bodies."""
-        found = []
+    assert _calcjob_paths(compile_graph(pw_relax_graph)) == {
+        ('init_relax_guarded', 'initial', 'pw_calc'),
+        ('main', 'pw_calc'),
+    }
+    assert _calcjob_paths(compile_graph(pw_module.init_relax_guarded)) == {('initial', 'pw_calc')}
 
-        def _visit(current) -> None:
-            if isinstance(current, SubgraphTask):
-                found.append(current)
-            if isinstance(current, LoopControl):
-                for nested in current.body.tasks:
-                    _visit(nested)
 
-        for current in template.tasks:
-            _visit(current)
-        return found
+def test_bands_scopes_follow_authored_aliases() -> None:
+    """The compiled bands graph addresses SCF/bands through ``scf``/``bands``.
 
-    names = set()
-    for target in (pw_relax_graph, pw_bands_graph):
-        for placement in _subgraphs(compile_graph(target)):
-            names.add(placement.name)
-    assert 'pw_base_graph' in names
+        The check compiles the production graph itself (no copies): each stage
+        descends exactly one level to the shared ``pw_calc`` leaf with no
+    generated numeric suffix and no direct ``pw_base_graph`` placement.
+    """
+    from aiida.engine.processes.graphs.lowering import compile_graph
+
+    assert _calcjob_paths(compile_graph(pw_bands_graph)) == {
+        ('scf', 'pw_calc'),
+        ('bands', 'pw_calc'),
+    }
 
 
 def test_prepare_next_converged() -> None:

@@ -39,20 +39,36 @@ branch-dependent ``after``: each variant hard-codes its own ordering.
 Scheduler options
 -----------------
 
-``CalcJob`` scheduler options travel at launch under ``task_metadata``, keyed
-by placement name (``'dos_calc'``/``'projwfc_calc'`` for the post-processing
-steps; the ``pw.x`` placements inside ``pw_base_graph`` take theirs under its
-own ``'pw_calc'`` key). The experimental per-bundle ``options`` ports of the
+``CalcJob`` scheduler options travel at launch under ``task_metadata`` as a
+strictly nested mapping, not through graph inputs. Each authored subgraph
+callee alias adds one level; the ``CalcJob`` placement alias holds the normal
+metadata mapping at the leaf. The stage scopes nest the ``nscf`` base alias
+plus the ``dos_calc``/``projwfc_calc`` placements; a from-scratch root nests
+the ``scf`` base scope beside its stage scope::
+
+    task_metadata = {
+        'pdos_stage_serial': {
+            'nscf': {'pw_calc': {'options': nscf_options}},
+            'dos_calc': {'options': dos_options},
+            'projwfc_calc': {'options': projwfc_options},
+        },
+    }
+    task_metadata = {
+        'scf': {'pw_calc': {'options': scf_options}},
+        'pdos_stage_serial': {
+            'nscf': {'pw_calc': {'options': nscf_options}},
+            'dos_calc': {'options': dos_options},
+            'projwfc_calc': {'options': projwfc_options},
+        },
+    }
+
+Branch and loop control frames are transparent: the serial variant's ordered
+sweeps add no key level. The experimental per-bundle ``options`` ports of the
 previous revision were removed rather than silently ignored. Form the launch
 mapping with :func:`task_metadata_for_options
-<aiida_quantumespresso.workflows.graphs.protocols.task_metadata_for_options>`::
-
-    from aiida_quantumespresso.workflows.graphs.protocols import task_metadata_for_options
-
-    task_metadata = task_metadata_for_options(
-        dos_calc={'options': {'max_wallclock_seconds': 43200}},
-        projwfc_calc={'options': {'max_wallclock_seconds': 43200}},
-    )
+<aiida_quantumespresso.workflows.graphs.protocols.task_metadata_for_options>`
+or as a literal nested mapping; unknown paths, missing entries, and
+non-mapping leaves fail loudly at launch.
 
 Honest limits of this rewrite (see ``reports/refinement-composites.md``):
 
@@ -66,7 +82,8 @@ Honest limits of this rewrite (see ``reports/refinement-composites.md``):
   :func:`resolve_post_windows`, which resolves both mappings from one window
   and returns them together.
 * There is no ``dry_run``. ``monitors`` is an optional shared ``DataDict`` forwarded
-  into every nested ``pw_base_graph`` (SCF and NSCF); per-stage overrides fall
+  into every nested base run through its authored alias (``scf`` for the SCF run,
+  ``nscf`` for the NSCF run); per-stage overrides fall
   back to the shared mapping. Protocol presets live in
   :mod:`aiida_quantumespresso.workflows.graphs.protocols` as plain mappings;
   pseudo-family and meta-parameter resolution still needs the caller.
@@ -82,6 +99,14 @@ from aiida.orm.nodes.data.array.projection import ProjectionData
 from aiida_quantumespresso.calculations.dos import DosCalculation
 from aiida_quantumespresso.calculations.projwfc import ProjwfcCalculation
 from aiida_quantumespresso.workflows.graphs.base import pw_base_graph
+
+# Authored callee aliases: repeated calls to the same subgraph are told apart by
+# the name used at the call site, so each metadata-bearing placement gets its own
+# module-level alias. The structured ``task_metadata`` descends one level per
+# alias (``{'scf': {'pw_calc': ...}}``); the ``dos_calc``/``projwfc_calc``
+# calculation tasks keep their own stable names as leaves.
+scf = pw_base_graph
+nscf = pw_base_graph
 
 __all__ = (
     'MatchedParameters',
@@ -452,7 +477,7 @@ def pdos_stage_parallel(
         parent_parameters=parent_output_parameters,
         nbands_factor=nbands_factor,
     )
-    nscf_run = pw_base_graph(
+    nscf_run = nscf(
         code=pw_code,
         structure=structure,
         pseudos=pseudos,
@@ -574,7 +599,7 @@ def pdos_stage_serial(
         parent_parameters=parent_output_parameters,
         nbands_factor=nbands_factor,
     )
-    nscf_run = pw_base_graph(
+    nscf_run = nscf(
         code=pw_code,
         structure=structure,
         pseudos=pseudos,
@@ -706,7 +731,7 @@ def pdos_from_scratch_parallel(
     :return: the SCF products, the stage products, and the summary report.
     """
     checked_scf_parameters = require_scf_parameters(parameters=scf_parameters)
-    scf_run = pw_base_graph(
+    scf_run = scf(
         code=pw_code,
         structure=structure,
         pseudos=pseudos,
@@ -821,7 +846,7 @@ def pdos_from_scratch_serial(
     :return: the SCF products, the stage products, and the summary report.
     """
     checked_scf_parameters = require_scf_parameters(parameters=scf_parameters)
-    scf_run = pw_base_graph(
+    scf_run = scf(
         code=pw_code,
         structure=structure,
         pseudos=pseudos,
