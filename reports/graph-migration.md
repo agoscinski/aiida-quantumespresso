@@ -85,6 +85,7 @@ supersedes their interim failures and the original migration/review conclusions.
 | --- | --- |
 | Combined QE graph suite | **100 passed**, 6 warnings, 242.69 seconds |
 | Core graph suite, `-m presto -n 4` | **996 passed**, 4 warnings, 111.33 seconds |
+| QE graph suite with isolated pytest configuration | **100 passed**, 1169 mostly SQLAlchemy/dependency warnings, 250.59 seconds |
 | Focused mapped-output + forwarding regressions | **42 passed** in independent review |
 | Core pre-commit on changed files | **Passed**, including Ruff and mypy |
 | QE pre-commit on changed source/tests | **Passed** |
@@ -156,5 +157,21 @@ The existing undecorated scientific implementations can be reused in task bodies
 
 ## Remote verification
 
-Pending the new QE source push and CI run. Earlier results in `ci-verification.json`
-refer to the previous implementation and must not be read as this revision's CI.
+QE source revision **`cb94cf3565ff3379534819e2da06e270e62552a4`** was pushed to
+`origin/rewrite`. The core dependency above was pushed before updating the CI pin.
+A subsequent report-only commit records the results; it does not change executable
+code. `ci-verification.json` contains the observed public API job/step conclusions.
+
+| Run | Observed result |
+| --- | --- |
+| [QE stable-core CI 43910652437](https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43910652437) | **Passed:** pre-commit and tests on Python 3.10–3.14. Graph tests deliberately skip on released core: this verifies stable compatibility, not native graph execution. |
+| [QE native graph CI 43910652423](https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43910652423) | New core installation/revision gate **passed**; graph-test step **passed**; legacy workflow regression step **failed**. Overall run is **red**, not a feature-complete migration gate. |
+| [Core pre-commit 43909202414](https://github.com/agoscinski/aiida-core/actions/runs/43909202414) | **Passed.** |
+| [Core docs build 43909202253](https://github.com/agoscinski/aiida-core/actions/runs/43909202253) | **Passed.** |
+| [Broader core CI 43909202286](https://github.com/agoscinski/aiida-core/actions/runs/43909202286) | Still running at report observation; no full-core-CI success is claimed. Local graph regression results are separate. |
+
+The configured `gh` credential was previously invalid; verification uses public
+GitHub API job/step results. The local 89-failure legacy-suite breakdown is not a
+claimed remote log transcript. Stable CI and native graph tests are green, but
+legacy/core-3 compatibility and the outstanding behaviors listed above prevent a
+feature-complete verdict.
