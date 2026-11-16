@@ -69,9 +69,10 @@ old tests. Empty metadata leaves are preserved (they request defaults); only
 explicit `None` entries are omitted. Malformed protocol metadata receives an
 explicit boundary error instead of an internal merge exception.
 
-Initial combined QE verification: **191 graph tests passed**. Two additional
-boundary rejection cases and the revised empty-leaf test passed separately; the
-final combined run and remote CI results are recorded in `graph-migration.md`.
+Final combined QE verification: **193 graph tests passed**, 30 warnings,
+413.59 seconds. This includes two added boundary rejection cases, preservation of
+empty metadata leaves, and a production initial/main run with distinct scheduler
+options. Remote CI results are recorded in `graph-migration.md`.
 Repository-configured QE Ruff checks passed. CI now installs pytest-xdist and runs
 all graph tests with four workers; no graph tests are excluded.
 

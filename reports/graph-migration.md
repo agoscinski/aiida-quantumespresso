@@ -102,9 +102,16 @@ execute their native base loops; they do not copy production graph bodies.
 
 ## QE validation
 
-Initial full combined run: **191 passed**, 31 warnings, 376.13 seconds.
-Subsequent empty-leaf/boundary corrections passed their focused tests; final full
-suite and remote CI results will be recorded below after verification.
+Final full combined run: **193 passed**, 30 warnings, 413.59 seconds.
+An earlier complete run passed 191 tests before the two additional protocol-boundary
+rejection cases and empty-leaf correction. Both runs exercise actual production
+graphs with only external scientific executables substituted.
+
+The separate legacy workflow gate is **not green**: local parallel reproduction
+reported **47 failed, 104 passed, 1 skipped, 44 setup errors** (14.17 seconds).
+Failures include removed `orm.AbstractCode` usage; setup errors include pseudo-family
+creation trying to group an owned container child. These are concrete legacy/static-
+container compatibility gaps, not reasons to add another metadata addressing API.
 
 Commands from the original core worktree containing the validated source:
 
@@ -132,7 +139,20 @@ registries, or a new monitoring engine are missing core prerequisites.
 
 ## Remote verification
 
-Iteration 1 was pushed first and triggered core CI. Iteration 2 updates QE's pin to
-the already-published exact revision. Current iteration-2 source push, final suite,
-and CI observation are pending; old `ci-verification.json` results are historical
-until replaced with this iteration's observations.
+Iteration 1 was pushed first, then QE source revision
+**`5ab364a95d4da6fc4baed7994a8558ac39b4f5ad`** was pushed to `origin/rewrite`
+with the already-published core pin. A final report-only commit records these
+observations without changing executable source. Public GitHub API job/step
+conclusions are saved in `ci-verification.json`; failure logs were not downloaded.
+
+| Run | Observed result |
+| --- | --- |
+| [Core pre-commit 43964641937](https://github.com/agoscinski/aiida-core/actions/runs/43964641937) | **Passed.** |
+| [Core docs 43964642118](https://github.com/agoscinski/aiida-core/actions/runs/43964642118) | **Passed.** |
+| [Core code CI 43964641758](https://github.com/agoscinski/aiida-core/actions/runs/43964641758) | Presto, minimum-requirements, CLI, fixtures, Python 3.10/PostgreSQL/RabbitMQ, and Python 3.10/3.14 PostgreSQL/ZeroMQ jobs **passed**. Python 3.14/PostgreSQL/RabbitMQ was still running at observation; no all-core-CI conclusion is claimed. |
+| [QE stable-core CI 43967237944](https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43967237944) | **Passed:** pre-commit and Python 3.10–3.14 test jobs. Graph modules skip on released core: this is stable compatibility coverage. |
+| [QE graph CI 43967237948](https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43967237948) | Exact core revision/API gate and graph-test step **passed**; legacy workflow regression step **failed**. Overall graph integration job remains **red**, not a full plugin-compatibility pass. |
+
+The legacy breakdown above is a local reproduction, not a remote log transcript.
+Metadata-specific behavior and the native QE suite pass; remaining plugin behavior
+and compatibility gaps prevent a feature-complete verdict.
