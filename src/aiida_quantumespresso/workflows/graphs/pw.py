@@ -17,10 +17,9 @@ k-point generation inside ``create_kpoints_from_distance``, path generation insi
 ``seekpath_structure_analysis``. The graphs only wire names, branch on explicit predicates, and loop with inline
 counters; every ``@task`` body delegates to the existing implementations.
 
-Run the checks for this module with the parent core environment plus the (transient, unpinned) ``plumpy``
-overlay that the legacy ``ProtocolMixin`` still imports::
+Run the checks with the pinned experimental core and QE dependencies installed::
 
-    uv run --with plumpy pytest aiida-quantumespresso/tests/graphs/test_pw.py -q
+    uv run pytest aiida-quantumespresso/tests/graphs/test_pw.py -q
 
 and validate without launching anything with ``assert pw_relax_graph.build() is None``. The sibling
 ``graphs/base.py`` track owns ``graphs/__init__.py``; the test module falls back to a stub if that package

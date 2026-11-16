@@ -17,10 +17,9 @@ error handling inside ``PwBaseWorkChain``, the energy window in :func:`extract_n
 in :func:`resolve_nscf_parameters`, and the DOS parameter assembly in :func:`resolve_post_windows`. The graphs
 only wire names, pass whole namespaces between tasks, and sweep remote folders through dedicated tasks.
 
-Run the checks for this module with the parent core environment plus the (transient, unpinned) ``plumpy``
-overlay that the legacy ``ProtocolMixin`` still imports::
+Run the checks with the pinned experimental core and QE dependencies installed::
 
-    uv run --with plumpy pytest aiida-quantumespresso/tests/graphs/test_pdos.py -q
+    uv run pytest aiida-quantumespresso/tests/graphs/test_pdos.py -q
 
 and validate without launching anything with ``assert pdos_from_scratch.build() is None``.
 
@@ -47,7 +46,7 @@ Honest limits of this rewrite (see ``reports/pdos-migration.md`` for the full re
   concurrently; plan scratch-disk headroom of the legacy parallel mode. ``clean_workdir`` sweeps the remaining
   remotes at the end through no-op-by-default tasks instead of ``on_terminated``.
 * There is no ``dry_run``, no monitor wiring, and no ``get_builder_from_protocol``: protocol presets stay on the
-  legacy work chain until the upstream ``plumpy``/``ProtocolMixin`` coupling is ported.
+  legacy work chain until graph-specific protocol builders are implemented.
 """
 
 import copy

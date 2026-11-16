@@ -8,10 +8,9 @@
 ############################################################################
 """Mocked tests for the native ``@graph`` PW relax/bands orchestration.
 
-Run from the parent core checkout (the legacy ``ProtocolMixin`` still imports ``plumpy``, which the core
-environment only provides as a transient overlay)::
+Run from the parent core checkout with the QE dependencies installed::
 
-    uv run --with plumpy pytest aiida-quantumespresso/tests/graphs/test_pw.py -q
+    uv run pytest aiida-quantumespresso/tests/graphs/test_pw.py -q
 
 The real graphs (:mod:`aiida_quantumespresso.workflows.graphs.pw`) are validated with ``build()`` and their
 ``@task`` adapters run for real through ``run_get_node`` (all local: no codes, no cluster). Full orchestration
