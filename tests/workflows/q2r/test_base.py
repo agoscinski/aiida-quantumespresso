@@ -1,8 +1,9 @@
 """Tests for the `Q2rBaseWorkChain` class."""
 
 import pytest
+
 from aiida.common import AttributeDict
-from plumpy import ProcessState
+from aiida.engine import ProcessState
 
 
 @pytest.fixture

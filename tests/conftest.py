@@ -77,8 +77,8 @@ def serialize_builder():
         from aiida.orm import AbstractCode, BaseType, Data, Dict, KpointsData, List, RemoteData, SinglefileData
         from aiida.plugins import DataFactory
 
-        StructureData = DataFactory('core.structure')  # noqa: N806
-        UpfData = DataFactory('pseudo.upf')  # noqa: N806
+        StructureData = DataFactory('core.structure')
+        UpfData = DataFactory('pseudo.upf')
 
         if isinstance(data, dict):
             return {key: serialize_data(value) for key, value in data.items()}
@@ -129,9 +129,10 @@ def serialize_builder():
 @pytest.fixture(scope='session')
 def pseudo_family(generate_upf_data):
     """Create the SSSP pseudo potential families from scratch."""
-    from aiida.common.constants import elements
     from aiida_pseudo.data.pseudo.upf import UpfData
     from aiida_pseudo.groups.family import PseudoDojoFamily, SsspFamily
+
+    from aiida.common.constants import elements
 
     cutoffs = {}
     stringency = 'standard'
@@ -305,9 +306,8 @@ def generate_calc_job_node(fixture_localhost, tmp_path_factory):
             node.base.attributes.set_many(attributes)
 
         if filepath_folder:
-            from qe_tools.exceptions import ParsingError
-
             from aiida_quantumespresso.tools.pwinputparser import PwInputFile
+            from qe_tools.exceptions import ParsingError
 
             try:
                 with open(filepath_input, encoding='utf-8') as input_file:
@@ -384,6 +384,7 @@ def generate_xy_data():
     def _generate_xy_data():
         """Return an ``XyData`` node."""
         import numpy as np
+
         from aiida.orm import XyData
 
         xvals = [1, 2, 3]
@@ -580,9 +581,10 @@ def generate_bands_data():
     def _generate_bands_data():
         """Return a `BandsData` instance with some basic `kpoints` and `bands` arrays."""
         import numpy as np
+
         from aiida.plugins import DataFactory
 
-        BandsData = DataFactory('core.array.bands')  # noqa: N806
+        BandsData = DataFactory('core.array.bands')
         bands_data = BandsData()
 
         bands_data.set_kpoints(np.array([[0.0, 0.0, 0.0], [0.625, 0.25, 0.625]]))
@@ -745,10 +747,10 @@ def generate_inputs_ph(
         :param with_output_structure: whether the PwCalculation has a StructureData in its outputs.
             This is needed to test some PhBaseWorkChain logics.
         """
+        from aiida_quantumespresso.utils.resources import get_default_options
+
         from aiida.common import LinkType
         from aiida.orm import Dict, RemoteData
-
-        from aiida_quantumespresso.utils.resources import get_default_options
 
         pw_node = generate_calc_job_node(
             entry_point_name='quantumespresso.pw', inputs={'parameters': Dict(), 'structure': generate_structure()}
@@ -782,9 +784,9 @@ def generate_inputs_pw(fixture_code, generate_structure, generate_kpoints_mesh, 
 
     def _generate_inputs_pw():
         """Generate default inputs for a `PwCalculation."""
-        from aiida.orm import Dict
-
         from aiida_quantumespresso.utils.resources import get_default_options
+
+        from aiida.orm import Dict
 
         parameters = Dict(
             {
@@ -849,9 +851,9 @@ def generate_inputs_cp(fixture_code, generate_structure, generate_upf_data):
 
     def _generate_inputs_cp(autopilot=False):
         """Generate default inputs for a CpCalculation."""
-        from aiida.orm import Dict
-
         from aiida_quantumespresso.utils.resources import get_default_options
+
+        from aiida.orm import Dict
 
         inputs = {
             'code': fixture_code('quantumespresso.cp'),
@@ -889,8 +891,8 @@ def generate_workchain_pw(generate_workchain, generate_inputs_pw, generate_calc_
             and the values to the output nodes.
         """
         from aiida.common import LinkType
+        from aiida.engine import ProcessState
         from aiida.orm import Dict
-        from plumpy import ProcessState
 
         entry_point = 'quantumespresso.pw.base'
 
@@ -936,8 +938,8 @@ def generate_workchain_neb(generate_workchain, generate_inputs_neb, generate_cal
             and the values to the output nodes.
         """
         from aiida.common import LinkType
+        from aiida.engine import ProcessState
         from aiida.orm import Dict
-        from plumpy import ProcessState
 
         entry_point = 'quantumespresso.neb.base'
 
@@ -974,7 +976,7 @@ def generate_workchain_ph(generate_workchain, generate_inputs_ph, generate_calc_
     """Generate an instance of a `PhBaseWorkChain`."""
 
     def _generate_workchain_ph(exit_code=None, inputs=None, return_inputs=False):
-        from plumpy import ProcessState
+        from aiida.engine import ProcessState
 
         entry_point = 'quantumespresso.ph.base'
 
@@ -1006,9 +1008,9 @@ def generate_workchain_pdos(generate_workchain, generate_inputs_pw, fixture_code
     """Generate an instance of a `PdosWorkChain`."""
 
     def _generate_workchain_pdos(emin=None, emax=None, energy_range_vs_fermi=None):
-        from aiida.orm import Bool, Dict, List
-
         from aiida_quantumespresso.utils.resources import get_default_options
+
+        from aiida.orm import Bool, Dict, List
 
         entry_point = 'quantumespresso.pdos'
 

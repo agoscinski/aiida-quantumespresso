@@ -4,13 +4,11 @@ import copy
 import inspect
 import pathlib
 import warnings
-from typing import Optional, Union
 
 import yaml
-from aiida.orm import StructureData
-from aiida.engine import WorkChain
-from plumpy import PortNamespace
 
+from aiida.engine import PortNamespace, WorkChain
+from aiida.orm import StructureData
 from aiida_quantumespresso.common.types import SpinType
 
 
@@ -45,8 +43,8 @@ class ProtocolMixin:
     @classmethod
     def get_protocol_inputs(
         cls,
-        protocol: Optional[dict] = None,
-        overrides: Union[dict, pathlib.Path, None] = None,
+        protocol: dict | None = None,
+        overrides: dict | pathlib.Path | None = None,
     ) -> dict:
         """Return the inputs for the given workflow class and protocol.
 
@@ -232,7 +230,7 @@ def get_magnetization_parameters() -> dict:
 def get_magnetization(
     structure: StructureData,
     z_valences: dict,
-    initial_magnetic_moments: Optional[dict] = None,
+    initial_magnetic_moments: dict | None = None,
     spin_type: SpinType = SpinType.COLLINEAR,
 ) -> dict:
     """Return a magnetization dictionary with for each kind in the structure.

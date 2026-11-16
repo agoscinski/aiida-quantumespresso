@@ -14,6 +14,15 @@ Install the package following [the instructions in the documentation](https://ai
 
 Go through [the quick start tutorial](https://aiida-quantumespresso.readthedocs.io/en/stable/get_started/quick_start.html) to understand the basics.
 
+## Experimental graph workflows
+
+`aiida_quantumespresso.workflows.graphs` provides native graph alternatives for the
+nine workflow families. **The migration is not feature-complete or a drop-in
+replacement.** Legacy workflow entry points remain unchanged. Graphs require the
+exact experimental core revision pinned in `.github/workflows/graph.yml`.
+See the [migration and verification report](reports/graph-migration.md) for coverage,
+test results, installation context, and graph-layer blockers.
+
 ## 🤝 Compatibility with other codes
 
 The matrix below assumes the user always install the latest patch release of the specified minor version, which is recommended.
