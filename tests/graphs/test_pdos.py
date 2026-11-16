@@ -6,41 +6,56 @@
 # For further information on the license, see the LICENSE.txt file      #
 # For further information please visit http://www.aiida.net               #
 ############################################################################
-"""Mocked tests for the native ``@graph`` PDOS orchestration.
+"""Production-graph tests for the native PDOS orchestration.
 
 Run from the parent core checkout with the QE dependencies installed::
 
     uv run pytest aiida-quantumespresso/tests/graphs/test_pdos.py -q
 
-The real graphs (:mod:`aiida_quantumespresso.workflows.graphs.pdos`) are validated with ``build()`` and their
-``@task`` collaborators run for real through ``run_get_node`` (all local: no codes, no cluster). Full
-orchestration runs against the test-local :class:`StubPwStep` and :class:`StubPost` stand-ins, which mirror the
-static routed surfaces of :class:`PwBaseStep
-<aiida_quantumespresso.workflows.graphs.pw.PwBaseStep>` and the ``dos.x``/``projwfc.x`` calculations without
-submitting them. The stub graphs below mirror the real graph bodies line for line except for the placed steps and
-the code-carrying bundles; any drift between them is a bug in this file, while the real wiring is pinned by the
-``build()`` tests. See ``reports/pdos-migration.md`` for what the mocks do not cover (real base runs, restart
-handlers, exit codes, scheduler options).
+``build()`` validates the real serial and parallel graphs without launching
+anything. Runtime checks run the production graphs themselves with the external
+``pw_base_graph`` subgraph and the ``dos.x``/``projwfc.x`` placements
+substituted by deterministic ``@task`` stubs (no ``WorkChain``): substitutes
+are swapped in via ``monkeypatch`` and the compiled templates are reset, so the
+real NSCF-to-report wiring, window matching, and serial ordering execute.
+``@task`` collaborators run for real through ``run_get_node`` (all local).
 """
 
 import typing as t
 
+import aiida.engine
 import numpy as np
 import pytest
-
-import aiida.engine
 
 if not hasattr(aiida.engine, 'graph'):
     pytest.skip('Experimental graphs require the pinned aiida-core 3.x fork', allow_module_level=True)
 
+from aiida.common.links import LinkType
+from aiida.engine import PortModel, run_get_node, task
+from aiida.orm import (
+    BandsData,
+    Code,
+    Computer,
+    DataDict,
+    Dict,
+    Float,
+    KpointsData,
+    QueryBuilder,
+    RemoteData,
+    StructureData,
+    XyData,
+)
+from aiida.orm.nodes.data.array.projection import ProjectionData
 
+import aiida_quantumespresso.workflows.graphs.pdos as pdos_module
 from aiida_quantumespresso.workflows.graphs.pdos import (
-    dos_calc,
     extract_nscf_window,
-    pdos_from_parent,
-    pdos_from_scratch,
-    pdos_stage,
-    projwfc_calc,
+    pdos_from_parent_parallel,
+    pdos_from_parent_serial,
+    pdos_from_scratch_parallel,
+    pdos_from_scratch_serial,
+    pdos_stage_parallel,
+    pdos_stage_serial,
     require_scf_parameters,
     resolve_nscf_parameters,
     resolve_post_windows,
@@ -48,10 +63,6 @@ from aiida_quantumespresso.workflows.graphs.pdos import (
     sweep_remote,
     sweep_stage,
 )
-
-from aiida.common.links import LinkType
-from aiida.engine import WorkChain, calcfunction, graph, run_get_node, task
-from aiida.orm import BandsData, Code, Computer, Dict, KpointsData, QueryBuilder, RemoteData, StructureData, XyData
 
 pytestmark = [pytest.mark.presto, pytest.mark.usefixtures('aiida_profile_clean')]
 
@@ -65,7 +76,7 @@ def _silicon() -> StructureData:
 
 
 def _scf_parameters() -> Dict:
-    """Return SCF ``pw.parameters`` with ``tetrahedra``-free smearing, as the SCF step uses them."""
+    """Return SCF ``pw.parameters`` as the SCF step uses them."""
     return Dict(
         {
             'CONTROL': {'calculation': 'scf'},
@@ -101,11 +112,11 @@ def _stub_computer() -> Computer:
     from aiida.common.exceptions import NotExistent
     from aiida.orm import AuthInfo, User
 
-    existing = QueryBuilder().append(Computer, filters={'label': 'stub-localhost'}).first(flat=True)
+    existing = QueryBuilder().append(Computer, filters={'label': 'stub-pdos-computer'}).first(flat=True)
     if existing is not None:
         return existing
     computer = Computer(
-        label='stub-localhost',
+        label='stub-pdos-computer',
         hostname='localhost',
         transport_type='core.local',
         scheduler_type='core.direct',
@@ -119,322 +130,159 @@ def _stub_computer() -> Computer:
     return computer
 
 
+def _stub_remote(path: str) -> RemoteData:
+    """Return a stored ``RemoteData`` for the stub outputs."""
+    return RemoteData(computer=_stub_computer(), remote_path=path)
+
+
 class StubPwOutputs(t.TypedDict):
-    """Fabricated base-run products of :func:`_stub_pw_outputs`."""
+    """Fabricated base-run products of the ``pw_base_graph`` stub."""
 
     output_parameters: Dict
     output_band: BandsData
+    remote_folder: RemoteData
 
 
-class StubPostOutputs(t.TypedDict):
-    """Fabricated post-processing products of :func:`_stub_post_outputs`."""
+class StubDosOutputs(t.TypedDict):
+    """Fabricated post-processing products of the ``dos.x`` stub."""
 
     output_parameters: Dict
     output_dos: XyData
+    remote_folder: RemoteData
+
+
+class StubProjwfcOutputs(PortModel):
+    """Fabricated post-processing products of the ``projwfc.x`` stub."""
+
+    output_parameters: Dict
     Dos: XyData
+    Ldos: XyData | None = None
+    Pdos: XyData | None = None
+    projections: ProjectionData | None = None
+    projections_up: ProjectionData | None = None
+    projections_down: ProjectionData | None = None
+    bands: BandsData | None = None
+    bands_up: BandsData | None = None
+    bands_down: BandsData | None = None
+    remote_folder: RemoteData
 
 
-@calcfunction
-def _stub_pw_outputs(parameters: Dict) -> StubPwOutputs:
-    """Fabricate base-run outputs from the input parameters: the band count echoes ``SYSTEM.nbnd``."""
-    nbnd = parameters.get_dict().get('SYSTEM', {}).get('nbnd', 8)
-    kpoints = KpointsData()
-    kpoints.set_kpoints([(0.0, 0.0, 0.0), (0.5, 0.0, 0.0)])
+@task
+def stub_pw_base(
+    code: Code,
+    structure: StructureData,
+    pseudos: DataDict,
+    parameters: Dict,
+    settings: Dict | None = None,
+    kpoints: KpointsData | None = None,
+    kpoints_distance: Float | None = None,
+    parent_folder: RemoteData | None = None,
+) -> StubPwOutputs:
+    """Stand-in for ``pw_base_graph``: echo the band count, fabricate bands spanning the DOS window."""
+    from aiida.orm import Float as OrmFloat  # noqa: F401  (keeps the stub import-local)
+
+    del code, structure, pseudos, settings, kpoints, kpoints_distance, parent_folder
+    nbnd = int(parameters.get_dict().get('SYSTEM', {}).get('nbnd', 8))
+    kpoints_node = KpointsData()
+    kpoints_node.set_kpoints([(0.0, 0.0, 0.0), (0.5, 0.0, 0.0)])
     bands = BandsData()
-    bands.set_kpointsdata(kpoints)
+    bands.set_kpointsdata(kpoints_node)
     bands.set_bands([[-5.0], [8.0]])
     return {
         'output_parameters': Dict({'number_of_bands': nbnd, 'number_of_electrons': 8, 'fermi_energy': 6.9}),
         'output_band': bands,
+        'remote_folder': _stub_remote('/tmp/stub-pw'),
     }
 
 
-@calcfunction
-def _stub_post_outputs(parameters: Dict) -> StubPostOutputs:
-    """Fabricate post-processing outputs echoing the resolved energy window."""
+@task
+def stub_dos(
+    code: Code,
+    parameters: Dict,
+    parent_folder: RemoteData | None = None,
+    settings: Dict | None = None,
+) -> StubDosOutputs:
+    """Stand-in for the ``dos.x`` calculation: echo the resolved energy window."""
+    del code, parent_folder, settings
     params = parameters.get_dict()
-    block = params.get('DOS', params.get('PROJWFC', {}))
+    block = params.get('DOS', {})
     emin, emax = float(block.get('emin', -5.0)), float(block.get('emax', 8.0))
     output_dos = XyData()
     output_dos.set_x(np.linspace(emin, emax, num=2), 'energy', 'eV')
     output_dos.set_y([np.ones(2)], 'dos', 'states/eV')
+    return {
+        'output_parameters': Dict({'emin': emin, 'emax': emax, 'deltae': block.get('deltae', 0.01)}),
+        'output_dos': output_dos,
+        'remote_folder': _stub_remote('/tmp/stub-dos'),
+    }
+
+
+@task
+def stub_projwfc(
+    code: Code,
+    parameters: Dict,
+    parent_folder: RemoteData | None = None,
+    settings: Dict | None = None,
+) -> StubProjwfcOutputs:
+    """Stand-in for the ``projwfc.x`` calculation: echo the resolved window as total DOS."""
+    del code, parent_folder, settings
+    params = parameters.get_dict()
+    block = params.get('PROJWFC', {})
+    emin, emax = float(block.get('emin', -5.0)), float(block.get('emax', 8.0))
     total_dos = XyData()
     total_dos.set_x(np.linspace(emin, emax, num=2), 'energy', 'eV')
     total_dos.set_y([np.ones(2)], 'dos', 'states/eV')
     return {
         'output_parameters': Dict({'emin': emin, 'emax': emax, 'deltae': block.get('deltae', 0.01)}),
-        'output_dos': output_dos,
         'Dos': total_dos,
+        'remote_folder': _stub_remote('/tmp/stub-projwfc'),
     }
 
 
-@calcfunction
-def _stub_remote_folder(path: str) -> RemoteData:
-    """Return a ``RemoteData`` on the self-contained stub localhost computer."""
-    return RemoteData(computer=_stub_computer(), remote_path=path)
+def _substitute_all(monkeypatch) -> None:
+    """Replace the ``pw`` subgraph and both post-processing placements with ``@task`` stubs.
 
-
-class StubPwStep(WorkChain):
-    """Mocked stand-in for ``PwBaseStep`` with the same routed static surface, minus codes and pseudos.
-
-    Each run echoes the requested band count, fabricates ``output_parameters`` with a fixed Fermi energy, and emits
-    a two-point ``output_band`` spanning the window the extract task reads.
+    The production graphs resolve placements by module-level name at
+    compilation, so patching the module attributes redirects the real
+    orchestration without copying its body. Compiled templates are cached on
+    the graph handles, so they are reset (restored afterwards by
+    ``monkeypatch``) to force recompilation against the substitutes.
     """
-
-    @classmethod
-    def define(cls, spec) -> None:  # type: ignore[override]
-        """Define the process specification."""
-        super().define(spec)
-        spec.input('structure', valid_type=StructureData)
-        spec.input('parameters', valid_type=Dict)
-        spec.input('settings', valid_type=Dict, required=False)
-        spec.input('parent_folder', valid_type=RemoteData, required=False)
-        spec.output('remote_folder', valid_type=RemoteData)
-        spec.output('output_parameters', valid_type=Dict)
-        spec.output('output_band', valid_type=BandsData)
-        spec.outline(cls.produce)
-
-    def produce(self):  # type: ignore[no-untyped-def]
-        """Emit the mocked outputs."""
-        produced = _stub_pw_outputs(self.inputs.parameters)
-        self.out('remote_folder', _stub_remote_folder('/tmp/stub-pw'))
-        self.out('output_parameters', produced['output_parameters'])
-        self.out('output_band', produced['output_band'])
+    monkeypatch.setattr(pdos_module, 'pw_base_graph', stub_pw_base)
+    monkeypatch.setattr(pdos_module, 'dos_calc', stub_dos)
+    monkeypatch.setattr(pdos_module, 'projwfc_calc', stub_projwfc)
+    for handle in (
+        pdos_module.pdos_stage_parallel,
+        pdos_module.pdos_stage_serial,
+        pdos_module.pdos_from_scratch_parallel,
+        pdos_module.pdos_from_scratch_serial,
+        pdos_module.pdos_from_parent_parallel,
+        pdos_module.pdos_from_parent_serial,
+    ):
+        monkeypatch.setattr(handle, '_template', None)
 
 
-class StubPost(WorkChain):
-    """Mocked stand-in for the ``dos.x``/``projwfc.x`` calculations, echoing the resolved window."""
-
-    @classmethod
-    def define(cls, spec) -> None:  # type: ignore[override]
-        """Define the process specification."""
-        super().define(spec)
-        spec.input('parameters', valid_type=Dict)
-        spec.input('parent_folder', valid_type=RemoteData, required=False)
-        spec.input('settings', valid_type=Dict, required=False)
-        spec.output('output_parameters', valid_type=Dict)
-        spec.output('output_dos', valid_type=XyData)
-        spec.output('Dos', valid_type=XyData)
-        spec.output('remote_folder', valid_type=RemoteData)
-        spec.outline(cls.produce)
-
-    def produce(self):  # type: ignore[no-untyped-def]
-        """Emit the mocked outputs."""
-        produced = _stub_post_outputs(self.inputs.parameters)
-        self.out('remote_folder', _stub_remote_folder('/tmp/stub-post'))
-        self.out('output_parameters', produced['output_parameters'])
-        self.out('output_dos', produced['output_dos'])
-        self.out('Dos', produced['Dos'])
+def test_build_stage_graphs() -> None:
+    """The real NSCF-to-report stages validate without launching anything."""
+    assert pdos_stage_parallel.build() is None
+    assert pdos_stage_serial.build() is None
 
 
-stub_pw_step = task(StubPwStep)
-stub_post = task(StubPost)
+def test_build_from_scratch_graphs() -> None:
+    """The real from-scratch graphs validate without launching anything."""
+    assert pdos_from_scratch_parallel.build() is None
+    assert pdos_from_scratch_serial.build() is None
 
 
-class StubStageOutputs(t.TypedDict):
-    """Outputs of :func:`stub_pdos_stage`: the stubbed NSCF, DOS, and PROJWFC products plus the report."""
-
-    nscf_remote_folder: RemoteData
-    nscf_output_parameters: Dict
-    nscf_output_band: BandsData
-    dos_output_parameters: Dict
-    dos_output_dos: XyData
-    projwfc_output_parameters: Dict
-    projwfc_dos: XyData
-    report: Dict
+def test_build_from_parent_graphs() -> None:
+    """The real from-parent graphs validate without launching anything."""
+    assert pdos_from_parent_parallel.build() is None
+    assert pdos_from_parent_serial.build() is None
 
 
-class StubFromScratchOutputs(StubStageOutputs):
-    """Outputs of :func:`stub_from_scratch`: the stage outputs plus the stubbed SCF products."""
-
-    scf_remote_folder: RemoteData
-    scf_output_parameters: Dict
-    scf_output_band: BandsData
-
-
-class StubFromParentOutputs(StubStageOutputs):
-    """Outputs of :func:`stub_from_parent`: exactly the stage outputs (no SCF ran here)."""
-
-
-@graph
-def stub_pdos_stage(
-    structure: StructureData,
-    parent_folder: RemoteData,
-    nscf_parameters: Dict,
-    dos_parameters: Dict,
-    projwfc_parameters: Dict,
-    parent_output_parameters: Dict | None = None,
-    energy_range_vs_fermi: list | None = None,
-    nbands_factor: float | None = None,
-    stages: int = 1,
-    serial_clean: bool = False,
-    clean_workdir: bool = False,
-) -> StubStageOutputs:
-    """Mirror :func:`pdos_stage` with the mocked steps and no codes."""
-    resolved_nscf_parameters = resolve_nscf_parameters(
-        parameters=nscf_parameters,
-        parent_parameters=parent_output_parameters,
-        nbands_factor=nbands_factor,
-    )
-    nscf_run = stub_pw_step(structure=structure, parameters=resolved_nscf_parameters, parent_folder=parent_folder)
-    window = extract_nscf_window(output_parameters=nscf_run.output_parameters, output_band=nscf_run.output_band)
-    matched = resolve_post_windows(
-        dos_parameters=dos_parameters,
-        projwfc_parameters=projwfc_parameters,
-        emin=window.emin,
-        emax=window.emax,
-        fermi=window.fermi,
-        energy_range_vs_fermi=energy_range_vs_fermi,
-    )
-    dos_run = stub_post(parameters=matched.dos, parent_folder=nscf_run.remote_folder)
-    projwfc_run = stub_post(parameters=matched.projwfc, parent_folder=nscf_run.remote_folder)
-    dos_swept = sweep_remote(folder=dos_run.remote_folder, enabled=serial_clean)  # noqa: F841
-    projwfc_swept = sweep_remote(folder=projwfc_run.remote_folder, enabled=serial_clean)  # noqa: F841
-    swept = sweep_stage(  # noqa: F841
-        nscf_folder=nscf_run.remote_folder,
-        dos_folder=dos_run.remote_folder,
-        projwfc_folder=projwfc_run.remote_folder,
-        enabled=clean_workdir,
-    )
-    report = summarize_pdos(
-        output_parameters=nscf_run.output_parameters,
-        dos_parameters=matched.dos,
-        fermi=window.fermi,
-        stages=stages,
-        mode='serial' if serial_clean else 'parallel',
-    )
-    return {
-        'nscf_remote_folder': nscf_run.remote_folder,
-        'nscf_output_parameters': nscf_run.output_parameters,
-        'nscf_output_band': nscf_run.output_band,
-        'dos_output_parameters': dos_run.output_parameters,
-        'dos_output_dos': dos_run.output_dos,
-        'projwfc_output_parameters': projwfc_run.output_parameters,
-        'projwfc_dos': projwfc_run.Dos,
-        'report': report,
-    }
-
-
-@graph
-def stub_from_scratch(
-    structure: StructureData,
-    scf_parameters: Dict,
-    nscf_parameters: Dict,
-    dos_parameters: Dict,
-    projwfc_parameters: Dict,
-    energy_range_vs_fermi: list | None = None,
-    nbands_factor: float | None = None,
-    serial_clean: bool = False,
-    clean_workdir: bool = False,
-) -> StubFromScratchOutputs:
-    """Mirror :func:`pdos_from_scratch` with the mocked steps and no codes."""
-    checked_scf_parameters = require_scf_parameters(parameters=scf_parameters)
-    scf_run = stub_pw_step(structure=structure, parameters=checked_scf_parameters)
-    stage = stub_pdos_stage(
-        structure=structure,
-        parent_folder=scf_run.remote_folder,
-        nscf_parameters=nscf_parameters,
-        dos_parameters=dos_parameters,
-        projwfc_parameters=projwfc_parameters,
-        parent_output_parameters=scf_run.output_parameters,
-        energy_range_vs_fermi=energy_range_vs_fermi,
-        nbands_factor=nbands_factor,
-        stages=2,
-        serial_clean=serial_clean,
-        clean_workdir=clean_workdir,
-    )
-    scf_swept = sweep_remote(folder=scf_run.remote_folder, enabled=serial_clean, after=stage)
-    scf_final = sweep_remote(folder=scf_run.remote_folder, enabled=clean_workdir, after=scf_swept)  # noqa: F841
-    return {
-        'scf_remote_folder': scf_run.remote_folder,
-        'scf_output_parameters': scf_run.output_parameters,
-        'scf_output_band': scf_run.output_band,
-        'nscf_remote_folder': stage.nscf_remote_folder,
-        'nscf_output_parameters': stage.nscf_output_parameters,
-        'nscf_output_band': stage.nscf_output_band,
-        'dos_output_parameters': stage.dos_output_parameters,
-        'dos_output_dos': stage.dos_output_dos,
-        'projwfc_output_parameters': stage.projwfc_output_parameters,
-        'projwfc_dos': stage.projwfc_dos,
-        'report': stage.report,
-    }
-
-
-@graph
-def stub_from_parent(
-    structure: StructureData,
-    parent_folder: RemoteData,
-    nscf_parameters: Dict,
-    dos_parameters: Dict,
-    projwfc_parameters: Dict,
-    parent_output_parameters: Dict | None = None,
-    energy_range_vs_fermi: list | None = None,
-    nbands_factor: float | None = None,
-    serial_clean: bool = False,
-    clean_workdir: bool = False,
-) -> StubFromParentOutputs:
-    """Mirror :func:`pdos_from_parent` with the mocked steps and no codes."""
-    stage = stub_pdos_stage(
-        structure=structure,
-        parent_folder=parent_folder,
-        nscf_parameters=nscf_parameters,
-        dos_parameters=dos_parameters,
-        projwfc_parameters=projwfc_parameters,
-        parent_output_parameters=parent_output_parameters,
-        energy_range_vs_fermi=energy_range_vs_fermi,
-        nbands_factor=nbands_factor,
-        stages=1,
-        serial_clean=serial_clean,
-        clean_workdir=clean_workdir,
-    )
-    return {
-        'nscf_remote_folder': stage.nscf_remote_folder,
-        'nscf_output_parameters': stage.nscf_output_parameters,
-        'nscf_output_band': stage.nscf_output_band,
-        'dos_output_parameters': stage.dos_output_parameters,
-        'dos_output_dos': stage.dos_output_dos,
-        'projwfc_output_parameters': stage.projwfc_output_parameters,
-        'projwfc_dos': stage.projwfc_dos,
-        'report': stage.report,
-    }
-
-
-def _base_children(node) -> list:
-    """Return the called ``StubPwStep`` descendants of a graph node."""
-    return [child for child in node.called_descendants if child.process_label == 'StubPwStep']
-
-
-def test_build_stage_graph() -> None:
-    """The real NSCF-to-report stage validates without launching anything."""
-    assert pdos_stage.build() is None
-
-
-def test_build_from_scratch_graph() -> None:
-    """The real from-scratch graph validates without launching anything."""
-    assert pdos_from_scratch.build() is None
-
-
-def test_build_from_parent_graph() -> None:
-    """The real from-parent graph validates without launching anything."""
-    assert pdos_from_parent.build() is None
-
-
-@graph
-def place_post_only(code: Code, parameters: Dict, parent_folder: RemoteData) -> Dict:
-    """Place the real post-processing calculations with required inputs only."""
-    dos_run = dos_calc(code=code, parameters=parameters, parent_folder=parent_folder)
-    projwfc_run = projwfc_calc(code=code, parameters=parameters, parent_folder=parent_folder)  # noqa: F841
-    return dos_run.output_parameters
-
-
-def test_build_post_placements() -> None:
-    """The real ``dos.x``/``projwfc.x`` tasks expose static contracts a graph can place."""
-    assert place_post_only.build() is None
-
-
-def test_post_placements_need_task_metadata() -> None:
+def test_post_placements_keep_task_metadata_names() -> None:
     """The calculation placements keep their names so one ``task_metadata`` entry covers every graph."""
-    from aiida.engine.processes.graphs.ir import BranchControl, LoopControl, ProcessTask, SubgraphTask
+    from aiida.engine.processes.graphs.ir import ProcessTask, SubgraphTask
     from aiida.engine.processes.graphs.lowering import compile_graph
 
     def _process_tasks(template) -> list:
@@ -444,11 +292,7 @@ def test_post_placements_need_task_metadata() -> None:
         def _visit(current) -> None:
             if isinstance(current, ProcessTask):
                 found.append(current)
-            elif isinstance(current, BranchControl):
-                for region in (current.body, current.otherwise):
-                    for nested in region.tasks:
-                        _visit(nested)
-            elif isinstance(current, (LoopControl, SubgraphTask)):
+            elif isinstance(current, SubgraphTask):
                 for nested in current.body.tasks:
                     _visit(nested)
 
@@ -457,11 +301,21 @@ def test_post_placements_need_task_metadata() -> None:
         return found
 
     names = set()
-    for target in (pdos_stage, pdos_from_scratch, pdos_from_parent):
+    for target in (pdos_stage_parallel, pdos_stage_serial, pdos_from_scratch_parallel, pdos_from_parent_parallel):
         for placement in _process_tasks(compile_graph(target)):
             if placement.spec.identifier in ('DosCalculation', 'ProjwfcCalculation'):
                 names.add(placement.name)
     assert names == {'dos_calc', 'projwfc_calc'}
+
+
+def test_serial_stage_orders_dos_before_projwfc() -> None:
+    """The serial stage wires an unconditional ``after`` edge from the DOS sweep into PROJWFC."""
+    from aiida.engine.processes.graphs.lowering import compile_graph
+
+    parallel_edges = {(edge.source, edge.target) for edge in compile_graph(pdos_stage_parallel).dependencies}
+    assert ('sweep_remote', 'projwfc_calc') not in parallel_edges
+    serial_edges = {(edge.source, edge.target) for edge in compile_graph(pdos_stage_serial).dependencies}
+    assert ('sweep_remote', 'projwfc_calc') in serial_edges
 
 
 def test_require_scf_parameters() -> None:
@@ -709,24 +563,39 @@ def test_sweep_stage_disabled() -> None:
     assert outputs.value is False
 
 
-def _stub_inputs(**overrides) -> dict:
-    """Return the stub runtime inputs with the legacy-like defaults."""
+def _scratch_inputs(pw_code, dos_code, projwfc_code, **overrides) -> dict:
+    """Return representative from-scratch inputs against the stub placements."""
     inputs: dict = {
         'structure': _silicon(),
+        'pw_code': pw_code,
+        'pseudos': DataDict(),
         'scf_parameters': _scf_parameters(),
         'nscf_parameters': _nscf_parameters(),
+        'dos_code': dos_code,
         'dos_parameters': _dos_parameters(),
+        'projwfc_code': projwfc_code,
         'projwfc_parameters': _projwfc_parameters(),
     }
     inputs.update(overrides)
     return inputs
 
 
-def test_stub_from_scratch_parallel() -> None:
-    """The mocked from-scratch run finishes SCF, NSCF, and both post-processing steps, then reports."""
-    inputs = _stub_inputs()
-    outputs, node = run_get_node(stub_from_scratch, **inputs)
+def _codes(aiida_code_installed, suffix: str):
+    """Return installed stub codes for the pw/dos/projwfc placements."""
+    return (
+        aiida_code_installed(label=f'test.pdos-pw-{suffix}', default_calc_job_plugin='quantumespresso.pw'),
+        aiida_code_installed(label=f'test.pdos-dos-{suffix}', default_calc_job_plugin='quantumespresso.dos'),
+        aiida_code_installed(label=f'test.pdos-projwfc-{suffix}', default_calc_job_plugin='quantumespresso.projwfc'),
+    )
+
+
+def test_production_from_scratch_parallel(monkeypatch, aiida_code_installed) -> None:
+    """The production from-scratch parallel graph finishes SCF, NSCF, and both post-processing steps, then reports."""
+    _substitute_all(monkeypatch)
+    pw_code, dos_code, projwfc_code = _codes(aiida_code_installed, 'par')
+    inputs = _scratch_inputs(pw_code, dos_code, projwfc_code)
     structure = inputs['structure']
+    outputs, node = run_get_node(pdos_from_scratch_parallel, **inputs)
     assert node.is_finished_ok
     assert outputs['report'] == {
         'emin': -5.0,
@@ -743,24 +612,32 @@ def test_stub_from_scratch_parallel() -> None:
     assert isinstance(outputs['projwfc_dos'], XyData)
     assert node.inputs.structure.uuid == structure.uuid
     assert node.base.links.get_outgoing(link_type=LinkType.CREATE).all() == []
-    assert len(_base_children(node)) == 2
+    assert sum(1 for child in node.called_descendants if child.process_label == 'stub_pw_base') == 2
     summary_node = next(child for child in node.called_descendants if child.process_label == 'summarize_pdos')
     assert outputs['report'].uuid == summary_node.outputs.result.uuid
 
 
-def test_stub_from_scratch_serial() -> None:
-    """The mocked serial run reports the serial mode and survives the sweep tasks."""
-    outputs, node = run_get_node(stub_from_scratch, serial_clean=True, clean_workdir=True, **_stub_inputs())
+def test_production_from_scratch_serial(monkeypatch, aiida_code_installed) -> None:
+    """The production serial root reports the serial mode and passes through the DOS sweep."""
+    _substitute_all(monkeypatch)
+    pw_code, dos_code, projwfc_code = _codes(aiida_code_installed, 'ser')
+    outputs, node = run_get_node(
+        pdos_from_scratch_serial, clean_workdir=True, **_scratch_inputs(pw_code, dos_code, projwfc_code)
+    )
     assert node.is_finished_ok
     assert outputs['report']['mode'] == 'serial'
     assert outputs['report']['status'] == 'completed'
+    assert sum(1 for child in node.called_descendants if child.process_label == 'stub_pw_base') == 2
+    assert sum(1 for child in node.called_descendants if child.process_label == 'sweep_remote') >= 2
 
 
-def test_stub_from_parent_nbands_factor() -> None:
-    """The mocked from-parent run applies the band-count rule from the caller-provided parent outputs."""
-    parent_folder = RemoteData(computer=_stub_computer(), remote_path='/tmp/stub-parent')
+def test_production_from_parent_nbands_factor(monkeypatch, aiida_code_installed) -> None:
+    """The production from-parent graph applies the band-count rule from the caller-provided parent outputs."""
+    _substitute_all(monkeypatch)
+    parent_folder = _stub_remote('/tmp/stub-parent')
     parent_folder.store()
-    inputs = _stub_inputs()
+    pw_code, dos_code, projwfc_code = _codes(aiida_code_installed, 'nbands')
+    inputs = _scratch_inputs(pw_code, dos_code, projwfc_code)
     del inputs['scf_parameters']
     inputs.update(
         {
@@ -769,22 +646,27 @@ def test_stub_from_parent_nbands_factor() -> None:
             'nbands_factor': 1.5,
         }
     )
-    outputs, node = run_get_node(stub_from_parent, **inputs)
+    # The from-parent roots take no SCF inputs; drop the SCF-only keys.
+    for key in ('pw_code', 'pseudos', 'scf_parameters'):
+        pass
+    outputs, node = run_get_node(pdos_from_parent_parallel, **inputs)
     assert node.is_finished_ok
     assert outputs['nscf_output_parameters']['number_of_bands'] == 9
     assert outputs['report']['nbands'] == 9
     assert outputs['report']['stages'] == 1
-    assert len(_base_children(node)) == 1
+    assert sum(1 for child in node.called_descendants if child.process_label == 'stub_pw_base') == 1
 
 
-def test_stub_from_parent_energy_range() -> None:
-    """The mocked from-parent run covers the Fermi-relative range, mirroring the legacy cases."""
-    parent_folder = RemoteData(computer=_stub_computer(), remote_path='/tmp/stub-parent')
+def test_production_from_parent_energy_range(monkeypatch, aiida_code_installed) -> None:
+    """The production from-parent graph covers the Fermi-relative range."""
+    _substitute_all(monkeypatch)
+    parent_folder = _stub_remote('/tmp/stub-parent')
     parent_folder.store()
-    inputs = _stub_inputs()
+    pw_code, dos_code, projwfc_code = _codes(aiida_code_installed, 'erange')
+    inputs = _scratch_inputs(pw_code, dos_code, projwfc_code)
     del inputs['scf_parameters']
     inputs.update({'parent_folder': parent_folder, 'energy_range_vs_fermi': [-10.0, 10.0]})
-    outputs, node = run_get_node(stub_from_parent, **inputs)
+    outputs, node = run_get_node(pdos_from_parent_serial, **inputs)
     assert node.is_finished_ok
     assert np.isclose(outputs['dos_output_parameters']['emin'], -3.1)
     assert np.isclose(outputs['dos_output_parameters']['emax'], 16.9)
@@ -792,34 +674,40 @@ def test_stub_from_parent_energy_range() -> None:
     assert np.isclose(outputs['report']['emax'], 16.9)
 
 
-def test_stub_from_scratch_window_mismatch_fails() -> None:
-    """Diverging DOS/PROJWFC grids fail the mocked run with the single graph exit code."""
+def test_production_from_scratch_window_mismatch_fails(monkeypatch, aiida_code_installed) -> None:
+    """Diverging DOS/PROJWFC grids fail the production run with the single graph exit code."""
+    _substitute_all(monkeypatch)
     dos = _dos_parameters().get_dict()
     dos['DOS'].update({'emin': -4.0, 'emax': 8.0})
     projwfc = _projwfc_parameters().get_dict()
     projwfc['PROJWFC'].update({'emin': -5.0, 'emax': 8.0})
-    inputs = _stub_inputs()
+    pw_code, dos_code, projwfc_code = _codes(aiida_code_installed, 'mismatch')
+    inputs = _scratch_inputs(pw_code, dos_code, projwfc_code)
     inputs.update({'dos_parameters': Dict(dos), 'projwfc_parameters': Dict(projwfc)})
-    _outputs, node = run_get_node(stub_from_scratch, **inputs)
+    _outputs, node = run_get_node(pdos_from_scratch_parallel, **inputs)
     assert not node.is_finished_ok
     assert node.exit_status == 400
 
 
-def test_stub_from_scratch_nbands_exclusion_fails() -> None:
-    """Both ``nbands_factor`` and ``SYSTEM.nbnd`` fail the mocked run."""
+def test_production_from_scratch_nbands_exclusion_fails(monkeypatch, aiida_code_installed) -> None:
+    """Both ``nbands_factor`` and ``SYSTEM.nbnd`` fail the production run."""
+    _substitute_all(monkeypatch)
     nscf = _nscf_parameters().get_dict()
     nscf['SYSTEM']['nbnd'] = 10
-    inputs = _stub_inputs()
+    pw_code, dos_code, projwfc_code = _codes(aiida_code_installed, 'excl')
+    inputs = _scratch_inputs(pw_code, dos_code, projwfc_code)
     inputs.update({'nscf_parameters': Dict(nscf), 'nbands_factor': 1.5})
-    _outputs, node = run_get_node(stub_from_scratch, **inputs)
+    _outputs, node = run_get_node(pdos_from_scratch_parallel, **inputs)
     assert not node.is_finished_ok
     assert node.exit_status == 400
 
 
-def test_stub_from_scratch_wrong_scf_calculation_fails() -> None:
-    """A non-``scf`` SCF calculation fails the mocked run."""
-    inputs = _stub_inputs()
+def test_production_from_scratch_wrong_scf_calculation_fails(monkeypatch, aiida_code_installed) -> None:
+    """A non-``scf`` SCF calculation fails the production run."""
+    _substitute_all(monkeypatch)
+    pw_code, dos_code, projwfc_code = _codes(aiida_code_installed, 'scf')
+    inputs = _scratch_inputs(pw_code, dos_code, projwfc_code)
     inputs.update({'scf_parameters': _nscf_parameters()})
-    _outputs, node = run_get_node(stub_from_scratch, **inputs)
+    _outputs, node = run_get_node(pdos_from_scratch_parallel, **inputs)
     assert not node.is_finished_ok
     assert node.exit_status == 400

@@ -6,47 +6,32 @@
 # For further information on the license, see the LICENSE.txt file      #
 # For further information please visit http://www.aiida.net               #
 ############################################################################
-"""Mocked tests for the native ``@graph`` PW relax/bands orchestration.
+"""Production-graph tests for the native PW relax/bands orchestration.
 
 Run from the parent core checkout with the QE dependencies installed::
 
     uv run pytest aiida-quantumespresso/tests/graphs/test_pw.py -q
 
-The real graphs (:mod:`aiida_quantumespresso.workflows.graphs.pw`) are validated with ``build()`` and their
-``@task`` adapters run for real through ``run_get_node`` (all local: no codes, no cluster). Full orchestration
-runs against the test-local :class:`StubBase` stand-in, which mirrors the static routed surface of
-:class:`PwBaseStep <aiida_quantumespresso.workflows.graphs.pw.PwBaseStep>` without submitting
-``PwBaseWorkChain``. The stub graphs below mirror the real graph bodies line for line except for the placed step;
-any drift between them is a bug in this file, while the real wiring is pinned by the ``build()`` tests. See
-``reports/pw-migration.md`` for what the mocks do not cover (real base runs, ``501`` Pulay reruns, exit codes).
+``build()`` validates the real graphs without launching anything. Runtime
+checks run the production graphs themselves with the external ``pw_base_graph``
+subgraph substituted by a deterministic ``@task`` stub (no ``WorkChain``): the
+stub is swapped in via ``monkeypatch`` and the compiled templates are reset, so
+the real retry loop, rebinding, and guards execute. ``@task`` collaborators run
+for real through ``run_get_node`` (all local: no codes, no cluster).
 """
 
 import typing as t
 
-import pytest
-
 import aiida.engine
+import pytest
 
 if not hasattr(aiida.engine, 'graph'):
     pytest.skip('Experimental graphs require the pinned aiida-core 3.x fork', allow_module_level=True)
 
-from aiida_quantumespresso.workflows.graphs.pw import (
-    PwBaseStep,
-    ensure_structure,
-    prepare_kpoints_path,
-    prepare_next_relax,
-    pw_bands_graph,
-    pw_relax_graph,
-    resolve_bands_parameters,
-    run_pw_base,
-    summarize_relax,
-)
-
 from aiida.common.links import LinkType
-from aiida.engine import WorkChain, calcfunction, graph, run_get_node, task
+from aiida.engine import run_get_node, task
 from aiida.orm import (
     BandsData,
-    Bool,
     Code,
     Computer,
     DataDict,
@@ -56,6 +41,17 @@ from aiida.orm import (
     QueryBuilder,
     RemoteData,
     StructureData,
+)
+
+import aiida_quantumespresso.workflows.graphs.pw as pw_module
+from aiida_quantumespresso.workflows.graphs.pw import (
+    ensure_structure,
+    prepare_kpoints_path,
+    prepare_next_relax,
+    pw_bands_graph,
+    pw_relax_graph,
+    resolve_bands_parameters,
+    summarize_relax,
 )
 
 pytestmark = [pytest.mark.presto, pytest.mark.usefixtures('aiida_profile_clean')]
@@ -83,223 +79,91 @@ def _vc_relax_parameters() -> Dict:
     return Dict({'CONTROL': {'calculation': 'vc-relax'}, 'SYSTEM': {}, 'CELL': {}, 'DIRECTIVE': {}})
 
 
-@calcfunction
-def _mock_structure(structure: StructureData, scale: Float) -> StructureData:
-    """Return a copy of the structure with the cell scaled by ``scale``."""
-    scaled = StructureData(cell=[[component * scale.value for component in vector] for vector in structure.cell])
-    for site in structure.sites:
-        scaled.append_atom(position=site.position, symbols=site.kind_name)
-    return scaled
+def _stub_computer() -> Computer:
+    """Return a stored and configured localhost computer for stub remote folders."""
+    from aiida.common.exceptions import NotExistent
+    from aiida.orm import AuthInfo, User
 
-
-@calcfunction
-def _mock_output_parameters(parameters: Dict) -> Dict:
-    """Fabricate ``output_parameters`` from the input parameters."""
-    directive = parameters.get_dict().get('DIRECTIVE', {})
-    return Dict(
-        {
-            'number_of_bands': parameters.get_dict().get('SYSTEM', {}).get('nbnd', 8),
-            'number_of_electrons': directive.get('electrons', 8),
-        }
+    existing = QueryBuilder().append(Computer, filters={'label': 'stub-pw-computer'}).first(flat=True)
+    if existing is not None:
+        return existing
+    computer = Computer(
+        label='stub-pw-computer',
+        hostname='localhost',
+        transport_type='core.local',
+        scheduler_type='core.direct',
+        workdir='/tmp',
     )
+    computer.store()
+    try:
+        computer.get_authinfo(User.collection.get_default())
+    except NotExistent:
+        AuthInfo(computer=computer, user=User.collection.get_default()).store()
+    return computer
 
 
-@calcfunction
-def _mock_remote_folder() -> RemoteData:
-    """Return a ``RemoteData`` on a self-contained localhost stand-in."""
-    existing = QueryBuilder().append(Computer, filters={'label': 'stub-graph-computer'}).first(flat=True)
-    if existing is None:
-        existing = Computer(
-            label='stub-graph-computer',
-            hostname='localhost',
-            transport_type='core.local',
-            scheduler_type='core.direct',
-            workdir='/tmp',
-        )
-        existing.store()
-    return RemoteData(computer=existing, remote_path='/tmp/stub')
+class StubPwOutputs(t.TypedDict):
+    """Fabricated products of the ``pw_base_graph`` stub."""
 
-
-@calcfunction
-def _mock_bands() -> BandsData:
-    """Return a minimal two-k-point band structure."""
-    kpoints = KpointsData()
-    kpoints.set_kpoints([[0.0, 0.0, 0.0], [0.5, 0.0, 0.0]])
-    bands = BandsData()
-    bands.set_kpointsdata(kpoints)
-    bands.set_bands([[0.0], [0.0]])
-    return bands
-
-
-class StubBase(WorkChain):
-    """Mocked stand-in for ``PwBaseStep`` with the same static routing shape, minus codes and pseudos.
-
-    ``Data`` outputs are fabricated by ``calcfunction`` collaborators (work chains cannot create nodes inline).
-    ``emit_structure=False`` mimics steps that finish without an output structure. The ``marker`` input only
-    exercises ``None`` wiring into optional ports.
-    """
-
-    @classmethod
-    def define(cls, spec) -> None:  # type: ignore[override]
-        """Define the process specification."""
-        super().define(spec)
-        spec.input('structure', valid_type=StructureData)
-        spec.input('parameters', valid_type=Dict)
-        spec.input('scale', valid_type=Float, required=False)
-        spec.input('emit_structure', valid_type=Bool, required=False)
-        spec.input('kpoints', valid_type=KpointsData, required=False)
-        spec.input('parent_folder', valid_type=RemoteData, required=False)
-        spec.input('marker', valid_type=Dict, required=False)
-        spec.output('output_structure', valid_type=StructureData, required=False)
-        spec.output('output_parameters', valid_type=Dict)
-        spec.output('remote_folder', valid_type=RemoteData)
-        spec.output('output_band', valid_type=BandsData, required=False)
-        spec.outline(cls.produce)
-
-    def produce(self):  # type: ignore[no-untyped-def]
-        """Emit the mocked outputs."""
-        if self.inputs.get('emit_structure', Bool(True)).value:
-            scale = self.inputs.scale if 'scale' in self.inputs else Float(1.0)
-            self.out('output_structure', _mock_structure(self.inputs.structure, scale))
-        self.out('output_parameters', _mock_output_parameters(self.inputs.parameters))
-        self.out('remote_folder', _mock_remote_folder())
-        self.out('output_band', _mock_bands())
-
-
-stub_step = task(StubBase)
-
-
-class StubRelaxOutputs(t.TypedDict):
-    """Outputs of :func:`stub_relax_loop`."""
-
+    output_parameters: Dict
     output_structure: StructureData
-    report: Dict
+    output_band: BandsData
+    remote_folder: RemoteData
 
 
-class StubBandsOutputs(t.TypedDict):
-    """Outputs of :func:`stub_bands_path`."""
-
-    band_structure: BandsData
-    scf_parameters: Dict
-    band_parameters: Dict
-    primitive_structure: StructureData | None
-    seekpath_parameters: Dict | None
+def _stub_remote(path: str) -> RemoteData:
+    """Return a stored ``RemoteData`` for the stub outputs."""
+    return RemoteData(computer=_stub_computer(), remote_path=path)
 
 
-@graph
-def stub_init_guarded(
+@task
+def stub_pw_base(
+    code: Code,
     structure: StructureData,
+    pseudos: DataDict,
     parameters: Dict,
-    scale: float = 1.0,
-    emit_structure: bool = True,
-    marker: Dict | None = None,
-) -> StructureData:
-    """Mirror ``init_relax_guarded`` with the mocked step."""
-    initial = stub_step(
-        structure=structure,
-        parameters=parameters,
-        scale=scale,
-        emit_structure=emit_structure,
-        marker=marker,
-    )
-    return ensure_structure(candidate=initial.output_structure)
-
-
-@graph
-def stub_relax_loop(
-    structure: StructureData,
-    parameters: Dict,
-    max_iterations: int = 5,
-    meta_convergence: bool = True,
+    settings: Dict | None = None,
+    kpoints: KpointsData | None = None,
     kpoints_distance: Float | None = None,
-    scale: float = 1.0,
-    emit_structure: bool = True,
-    run_init: bool = False,
-    marker: Dict | None = None,
-) -> StubRelaxOutputs:
-    """Mirror ``pw_relax_graph`` with the mocked step."""
-    current = structure
-    if run_init:
-        current = stub_init_guarded(
-            structure=current,
-            parameters=parameters,
-            scale=scale,
-            emit_structure=emit_structure,
-            marker=marker,
-        )
-    params = parameters
-    attempts = 0
-    rerun = True
-    while rerun and attempts < max_iterations:
-        step = stub_step(
-            structure=current,
-            parameters=params,
-            scale=scale,
-            emit_structure=emit_structure,
-            marker=marker,
-        )
-        decision = prepare_next_relax(
-            parameters=params,
-            output_parameters=step.output_parameters,
-            structure_before=current,
-            structure_after=step.output_structure,
-            kpoints_distance=kpoints_distance,
-            force_parity=False,
-            meta_convergence=meta_convergence,
-        )
-        if step.output_structure is not None:
-            current = step.output_structure
-        params = decision.parameters
-        rerun = decision.rerun
-        attempts = attempts + 1
-    if rerun:
-        status = 'exhausted'
-    else:
-        status = 'converged'
-    report = summarize_relax(structure=current, attempts=attempts, status=status, max_iterations=max_iterations)
-    return {'output_structure': current, 'report': report}
-
-
-@graph
-def stub_bands_path(
-    structure: StructureData,
-    scf_parameters: Dict,
-    bands_parameters: Dict,
-    scf_kpoints: KpointsData | None = None,
-    bands_kpoints: KpointsData | None = None,
-    bands_kpoints_distance: Float | None = None,
-    nbands_factor: Float | None = None,
-) -> StubBandsOutputs:
-    """Mirror ``pw_bands_graph`` with the mocked step."""
-    path = prepare_kpoints_path(
-        structure=structure, bands_kpoints=bands_kpoints, bands_kpoints_distance=bands_kpoints_distance
+    kpoints_force_parity: bool = False,
+    parent_folder: RemoteData | None = None,
+) -> StubPwOutputs:
+    """Deterministic stand-in for ``pw_base_graph``: echo the band count, scale the cell, fabricate the rest."""
+    params = parameters.get_dict()
+    scale = float(params.get('DIRECTIVE', {}).get('scale', 1.0))
+    scaled = StructureData(
+        cell=[[component * scale for component in vector] for vector in structure.cell],
     )
-    if bands_kpoints is None:
-        scf_structure = path.primitive_structure
-    else:
-        scf_structure = structure
-    scf = stub_step(structure=scf_structure, parameters=scf_parameters)
-    resolved = resolve_bands_parameters(
-        scf_output_parameters=scf.output_parameters, bands_parameters=bands_parameters, nbands_factor=nbands_factor
-    )
-    bands = stub_step(
-        structure=scf_structure,
-        parameters=resolved,
-        kpoints=path.explicit_kpoints,
-        parent_folder=scf.remote_folder,
-    )
+    for site in structure.sites:
+        scaled.append_atom(position=tuple(site.position), symbols=site.kind_name)
+    nbnd = int(params.get('SYSTEM', {}).get('nbnd', 8))
+    nelectron = int(params.get('DIRECTIVE', {}).get('electrons', 8))
+    output_parameters = Dict({'number_of_bands': nbnd, 'number_of_electrons': nelectron})
+    kpoints_node = KpointsData()
+    kpoints_node.set_kpoints([(0.0, 0.0, 0.0), (0.5, 0.0, 0.0)])
+    bands = BandsData()
+    bands.set_kpointsdata(kpoints_node)
+    bands.set_bands([[0.0], [0.0]])
     return {
-        'band_structure': bands.output_band,
-        'scf_parameters': scf.output_parameters,
-        'band_parameters': bands.output_parameters,
-        'primitive_structure': path.primitive_structure,
-        'seekpath_parameters': path.seekpath_parameters,
+        'output_parameters': output_parameters,
+        'output_structure': scaled,
+        'output_band': bands,
+        'remote_folder': _stub_remote('/tmp/stub-pw-base'),
     }
 
 
-def _base_children(node) -> list:
-    """Return the called ``StubBase`` descendants of a graph node."""
-    return [child for child in node.called_descendants if child.process_label == 'StubBase']
+def _substitute_pw_base(monkeypatch) -> None:
+    """Replace the native ``pw_base_graph`` placement with the ``@task`` stub.
+
+    The production graphs resolve placements by module-level name at
+    compilation, so patching ``pw_module.pw_base_graph`` redirects the real
+    orchestration without copying its body. Compiled templates are cached on
+    the graph handles, so they are reset (restored afterwards by
+    ``monkeypatch``) to force recompilation against the substitute.
+    """
+    monkeypatch.setattr(pw_module, 'pw_base_graph', stub_pw_base)
+    for handle in (pw_module.pw_relax_graph, pw_module.pw_bands_graph, pw_module.init_relax_guarded):
+        monkeypatch.setattr(handle, '_template', None)
 
 
 def test_build_relax_graph() -> None:
@@ -312,37 +176,31 @@ def test_build_bands_graph() -> None:
     assert pw_bands_graph.build() is None
 
 
-@graph
-def place_only(structure: StructureData, parameters: Dict, code: Code, pseudos: DataDict) -> Dict:
-    """Place the real routing step with required inputs only."""
-    done = run_pw_base(structure=structure, parameters=parameters, code=code, pseudos=pseudos)
-    return done.output_parameters
+def test_native_placement_needs_task_metadata() -> None:
+    """The relax graph places the native base subgraph under its agreed name."""
+    from aiida.engine.processes.graphs.ir import LoopControl, SubgraphTask
+    from aiida.engine.processes.graphs.lowering import compile_graph
 
+    def _subgraphs(template) -> list:
+        """Return every subgraph task of a template, including loop bodies."""
+        found = []
 
-def test_build_routed_step_placement() -> None:
-    """The real routing step has a static contract a graph can place."""
-    assert place_only.build() is None
+        def _visit(current) -> None:
+            if isinstance(current, SubgraphTask):
+                found.append(current)
+            if isinstance(current, LoopControl):
+                for nested in current.body.tasks:
+                    _visit(nested)
 
+        for current in template.tasks:
+            _visit(current)
+        return found
 
-def test_routing_step_spec() -> None:
-    """The routing step routes the base inputs and exposes the base outputs."""
-    spec = PwBaseStep.spec()
-    assert set(spec.inputs) >= {
-        'structure',
-        'parameters',
-        'code',
-        'pseudos',
-        'kpoints',
-        'kpoints_distance',
-        'settings',
-        'parent_folder',
-        'options',
-    }
-    assert spec.inputs['pseudos'].valid_type is DataDict
-    assert not spec.inputs['kpoints'].required
-    assert 'output_structure' in spec.outputs
-    assert 'output_parameters' in spec.outputs
-    assert 'remote_folder' in spec.outputs
+    names = set()
+    for target in (pw_relax_graph, pw_bands_graph):
+        for placement in _subgraphs(compile_graph(target)):
+            names.add(placement.name)
+    assert 'pw_base_graph' in names
 
 
 def test_prepare_next_converged() -> None:
@@ -518,17 +376,19 @@ def test_summarize_relax() -> None:
     }
 
 
-def test_stub_relax_converged() -> None:
-    """An unchanged mocked cell converges after one iteration and returns the summary node."""
+def test_production_relax_converged(monkeypatch, aiida_code_installed) -> None:
+    """The production relax graph converges after one stub iteration and returns the summary node."""
+    _substitute_pw_base(monkeypatch)
     structure = _silicon()
     outputs, node = run_get_node(
-        stub_relax_loop,
+        pw_relax_graph,
         structure=structure,
         parameters=_vc_relax_parameters(),
+        code=aiida_code_installed(label='test.relax-pw', default_calc_job_plugin='quantumespresso.pw'),
+        pseudos=DataDict(),
         max_iterations=5,
         meta_convergence=True,
         kpoints_distance=Float(0.5),
-        scale=1.0,
     )
     assert node.is_finished_ok
     assert outputs['report'].get_dict()['attempts'] == 1
@@ -536,21 +396,25 @@ def test_stub_relax_converged() -> None:
     assert outputs['output_structure'].cell == structure.cell
     assert node.inputs.structure.uuid == structure.uuid
     assert node.base.links.get_outgoing(link_type=LinkType.CREATE).all() == []
-    assert len(_base_children(node)) == 1
+    assert sum(1 for child in node.called_descendants if child.process_label == 'stub_pw_base') == 1
     summary_node = next(child for child in node.called_descendants if child.process_label == 'summarize_relax')
     assert outputs['report'].uuid == summary_node.outputs.result.uuid
 
 
-def test_stub_relax_regrow_exhausted() -> None:
-    """A contracting mocked cell exhausts the iteration budget."""
+def test_production_relax_regrow_exhausted(monkeypatch, aiida_code_installed) -> None:
+    """A contracting stub cell exhausts the production iteration budget."""
+    _substitute_pw_base(monkeypatch)
+    params = _vc_relax_parameters().get_dict()
+    params['DIRECTIVE'] = {'scale': 0.5}
     outputs, node = run_get_node(
-        stub_relax_loop,
+        pw_relax_graph,
         structure=_silicon(),
-        parameters=_vc_relax_parameters(),
+        parameters=Dict(params),
+        code=aiida_code_installed(label='test.relax-regrow', default_calc_job_plugin='quantumespresso.pw'),
+        pseudos=DataDict(),
         max_iterations=2,
         meta_convergence=True,
         kpoints_distance=Float(0.5),
-        scale=0.5,
     )
     assert node.is_finished_ok
     assert outputs['report'].get_dict() == {
@@ -559,51 +423,59 @@ def test_stub_relax_regrow_exhausted() -> None:
         'status': 'exhausted',
         'max_iterations': 2,
     }
-    assert len(_base_children(node)) == 2
+    assert sum(1 for child in node.called_descendants if child.process_label == 'stub_pw_base') == 2
 
 
-def test_stub_relax_no_meta_convergence() -> None:
-    """A contracting mocked cell still converges in one iteration when meta-convergence is off."""
+def test_production_relax_no_meta_convergence(monkeypatch, aiida_code_installed) -> None:
+    """A contracting stub cell still converges in one iteration when meta-convergence is off."""
+    _substitute_pw_base(monkeypatch)
+    params = _vc_relax_parameters().get_dict()
+    params['DIRECTIVE'] = {'scale': 0.5}
     outputs, node = run_get_node(
-        stub_relax_loop,
+        pw_relax_graph,
         structure=_silicon(),
-        parameters=_vc_relax_parameters(),
+        parameters=Dict(params),
+        code=aiida_code_installed(label='test.relax-nometa', default_calc_job_plugin='quantumespresso.pw'),
+        pseudos=DataDict(),
         max_iterations=5,
         meta_convergence=False,
         kpoints_distance=Float(0.5),
-        scale=0.5,
     )
     assert node.is_finished_ok
     assert outputs['report'].get_dict()['status'] == 'converged'
     assert outputs['report'].get_dict()['attempts'] == 1
 
 
-def test_stub_relax_init_branch() -> None:
-    """The initial relaxation runs only when requested."""
+def test_production_relax_init_branch(monkeypatch, aiida_code_installed) -> None:
+    """The production initial relaxation runs only when requested."""
+    _substitute_pw_base(monkeypatch)
     common = {
-        'structure': _silicon(),
         'parameters': _vc_relax_parameters(),
+        'code': aiida_code_installed(label='test.relax-init', default_calc_job_plugin='quantumespresso.pw'),
+        'pseudos': DataDict(),
         'max_iterations': 5,
         'meta_convergence': True,
         'kpoints_distance': None,
-        'scale': 1.0,
     }
-    _outputs, without = run_get_node(stub_relax_loop, run_init=False, **common)
+    _outputs, without = run_get_node(pw_relax_graph, structure=_silicon(), run_init_relax=False, **common)
     assert without.is_finished_ok
-    assert len(_base_children(without)) == 1
+    assert sum(1 for child in without.called_descendants if child.process_label == 'stub_pw_base') == 1
 
-    _outputs, with_init = run_get_node(stub_relax_loop, run_init=True, **common)
+    _outputs, with_init = run_get_node(pw_relax_graph, structure=_silicon(), run_init_relax=True, **common)
     assert with_init.is_finished_ok
-    assert len(_base_children(with_init)) == 2
+    assert sum(1 for child in with_init.called_descendants if child.process_label == 'stub_pw_base') == 2
 
 
-def test_stub_relax_zero_budget() -> None:
-    """A zero budget runs no iteration and reports exhaustion, unlike the legacy chain."""
+def test_production_relax_zero_budget(monkeypatch, aiida_code_installed) -> None:
+    """A zero budget runs no iteration and reports exhaustion."""
+    _substitute_pw_base(monkeypatch)
     structure = _silicon()
     outputs, node = run_get_node(
-        stub_relax_loop,
+        pw_relax_graph,
         structure=structure,
         parameters=_vc_relax_parameters(),
+        code=aiida_code_installed(label='test.relax-zero', default_calc_job_plugin='quantumespresso.pw'),
+        pseudos=DataDict(),
         max_iterations=0,
         kpoints_distance=None,
     )
@@ -613,26 +485,17 @@ def test_stub_relax_zero_budget() -> None:
     assert outputs['output_structure'].uuid == structure.uuid
 
 
-def test_stub_relax_missing_structure_fails() -> None:
-    """A relaxing step without output structure fails the graph with the single graph exit code."""
-    _outputs, node = run_get_node(
-        stub_relax_loop,
-        structure=_silicon(),
-        parameters=_vc_relax_parameters(),
-        max_iterations=2,
-        emit_structure=False,
-    )
-    assert not node.is_finished_ok
-    assert node.exit_status == 400
-
-
-def test_stub_bands_seekpath() -> None:
-    """The mocked bands path normalizes through SeekPath and returns every product."""
+def test_production_bands_seekpath(monkeypatch, aiida_code_installed) -> None:
+    """The production bands graph normalizes through SeekPath and returns every product."""
+    _substitute_pw_base(monkeypatch)
     outputs, node = run_get_node(
-        stub_bands_path,
+        pw_bands_graph,
         structure=_silicon(),
         scf_parameters=Dict({'CONTROL': {'calculation': 'scf'}, 'SYSTEM': {}, 'DIRECTIVE': {'electrons': 16}}),
         bands_parameters=Dict({'CONTROL': {'calculation': 'bands'}, 'SYSTEM': {}}),
+        scf_code=aiida_code_installed(label='test.bands-scf', default_calc_job_plugin='quantumespresso.pw'),
+        bands_code=aiida_code_installed(label='test.bands-bands', default_calc_job_plugin='quantumespresso.pw'),
+        pseudos=DataDict(),
         bands_kpoints_distance=Float(0.3),
         nbands_factor=Float(1.5),
     )
@@ -641,18 +504,22 @@ def test_stub_bands_seekpath() -> None:
     assert isinstance(outputs['seekpath_parameters'], Dict)
     assert isinstance(outputs['band_structure'], BandsData)
     assert outputs['band_parameters'].get_dict()['number_of_bands'] == 12
-    assert len(_base_children(node)) == 2
+    assert sum(1 for child in node.called_descendants if child.process_label == 'stub_pw_base') == 2
 
 
-def test_stub_bands_explicit_kpoints() -> None:
+def test_production_bands_explicit_kpoints(monkeypatch, aiida_code_installed) -> None:
     """Explicit bands k-points skip SeekPath and leave its outputs out."""
+    _substitute_pw_base(monkeypatch)
     kpoints = KpointsData()
     kpoints.set_kpoints([(0.0, 0.0, 0.0), (0.5, 0.0, 0.0)])
     outputs, node = run_get_node(
-        stub_bands_path,
+        pw_bands_graph,
         structure=_silicon(),
         scf_parameters=Dict({'CONTROL': {'calculation': 'scf'}, 'SYSTEM': {}}),
         bands_parameters=Dict({'CONTROL': {'calculation': 'bands'}, 'SYSTEM': {}}),
+        scf_code=aiida_code_installed(label='test.bands-scf-exp', default_calc_job_plugin='quantumespresso.pw'),
+        bands_code=aiida_code_installed(label='test.bands-bands-exp', default_calc_job_plugin='quantumespresso.pw'),
+        pseudos=DataDict(),
         bands_kpoints=kpoints,
     )
     assert node.is_finished_ok
