@@ -33,12 +33,16 @@ Per-workflow coverage
   ``cg`` with the tried list carried in the loop), electronic-convergence
   ``mixing_beta`` reduction, the recoverable ionic family (output-structure restart,
   ``cell_factor`` doubling, BFGS ``trust_radius``/``damp`` branches, one-shot
-  rattling), and the success-path insufficient-bands check. Deliberately not ported:
-  ``STOPPED_BY_MONITOR`` (the original gates on the exit *message*, which the error
-  arm does not carry), ``ERROR_IONIC_CONVERGENCE_REACHED_EXCEPT_IN_FINAL_SCF`` and
+  rattling), the monitor-stuck restart (``STOPPED_BY_MONITOR`` claimed only on the
+  machine-readable ``monitor_diagnostics['reason'] == 'accuracy_stuck'``, never on
+  the exit message; the ``accuracy_stuck`` monitor attaches that diagnostic only in
+  structured opt-in mode), and the success-path insufficient-bands check.
+  Deliberately not ported:
+  ``ERROR_IONIC_CONVERGENCE_REACHED_EXCEPT_IN_FINAL_SCF`` and
   ``WARNING_ELECTRONIC_CONVERGENCE_NOT_REACHED`` (the original finishes *with* an
-  exit code while attaching outputs; the graph keeps the loud ``ensure_*`` failure
-  instead of silently succeeding with a non-zero status), scheduler
+  exit code while attaching outputs; a graph has no fail-with-outputs contract, so
+  the graph keeps the loud ``ensure_*`` failure instead of silently succeeding with
+  a non-zero status or inventing success semantics), scheduler
   ``max_seconds`` capping (deriving this from fixed launch options remains
   input-preparation work), and the disabled empty ``exit_codes=[]`` handler.
 * ``ph_base_graph`` places ``PhCalculation`` with ``errors=PhErrors``. Ported:
@@ -91,8 +95,11 @@ Native ``pw`` subgraph
 
 ``pw_base_graph`` is the reusable restart loop for composite graphs:
 ``(code, structure, pseudos, parameters, settings?, kpoints?, kpoints_distance?,
-kpoints_force_parity?, parent_folder?, max_iterations?)``. ``parameters`` accepts a
-plain ``dict`` or an ``orm.Dict``. It returns the calculation outputs
+kpoints_force_parity?, parent_folder?, monitors?, max_iterations?)``. ``parameters`` accepts a
+plain ``dict`` or an ``orm.Dict``. ``monitors`` is an optional ``DataDict`` mapping
+monitor names onto monitor ``Dict`` nodes (entry point plus kwargs); dispatch expands
+it into the ``CalcJob`` ``monitors`` namespace at launch. Structured monitors attach
+a ``monitor_diagnostics`` output that the monitor-stuck handler reads. It returns the calculation outputs
 (``output_parameters`` always; ``output_structure``, ``output_band``,
 ``output_trajectory``, ``output_kpoints``, ``output_atomic_occupations`` and
 ``remote_folder`` when the finished run stores them) plus a ``report`` recording
@@ -112,6 +119,7 @@ from aiida_quantumespresso.calculations.ph import PhCalculation
 from aiida_quantumespresso.calculations.pw import PwCalculation
 from aiida_quantumespresso.calculations.q2r import Q2rCalculation
 from aiida_quantumespresso.data.force_constants import ForceConstantsData
+from aiida_quantumespresso.tools.monitors.accuracy_stuck import ACCURACY_STUCK_REASON
 from aiida_quantumespresso.utils.bands import get_highest_occupied_band
 
 # Fallback values mirror ``PwBaseWorkChain.defaults`` and ``qe_defaults``. They are
@@ -119,6 +127,7 @@ from aiida_quantumespresso.utils.bands import get_highest_occupied_band
 # require installed entry points.
 _MIXING_BETA_DEFAULT = 0.7
 _MIXING_BETA_FACTOR = 0.8
+_UPSCALE_MONITOR_FACTOR = 0.3
 _NBND_DELTA_FACTOR = 0.05
 _NBND_DELTA_MINIMUM = 4
 _UPSCALE_DEFAULT = 100
@@ -132,6 +141,9 @@ _CELL_FACTOR_DEFAULT = 2
 class PwErrors(ExitCodeEnum):
     """Handled ``pw.x`` failures that the graph restart loop may recover from."""
 
+    STOPPED_BY_MONITOR = ExitCode(
+        150, 'The calculation was stopped by a monitor; only a recognized diagnostic restarts it.'
+    )
     OUT_OF_WALLTIME = ExitCode(400, 'The calculation stopped prematurely because it ran out of walltime.')
     ELECTRONIC_CONVERGENCE_NOT_REACHED = ExitCode(
         410, 'The electronic minimization cycle did not reach self-consistency.'
@@ -399,6 +411,53 @@ def handle_pw_electronic_convergence(
     mixing_beta = updated['ELECTRONS'].get('mixing_beta', _MIXING_BETA_DEFAULT)
     updated['ELECTRONS']['mixing_beta'] = mixing_beta * _MIXING_BETA_FACTOR
     updated['CONTROL']['restart_mode'] = 'restart'
+    plan['parameters'] = updated
+    plan['restart'] = True
+    plan['parent_mode'] = 'remote'
+    return plan
+
+
+@task
+def handle_pw_monitor_stuck(
+    error: PwErrors | None,
+    parameters: dict,
+    tried: list,
+    diagnostics: orm.Dict | None,
+    restart: bool = False,
+    parent_mode: str = 'keep',
+    structure_from_output: bool = False,
+    rattle_now: bool = False,
+) -> PwRestartPlan:
+    """Reduce ``IONS.upscale`` and fully restart on an accuracy-stuck monitor stop.
+
+    Mirrors ``PwBaseWorkChain.handle_electronic_convergence_stuck`` except for the
+    dispatch contract: the legacy handler gates on the exit *message* prefix, which the
+    mapped error arm does not carry. This handler claims ``STOPPED_BY_MONITOR`` only
+    when the failed run stored a ``monitor_diagnostics`` output whose ``reason`` is
+    ``'accuracy_stuck'`` (attached by the structured ``accuracy_stuck`` monitor). An
+    unrelated monitor, a legacy string-only stop without diagnostics, or any other
+    failure passes the upstream restart decision through untouched, so the loop exits
+    and the guard fails loudly instead of retrying the wrong recovery. Like the
+    original, ``upscale`` already at its minimum requests no restart; both paths
+    fully restart (``restart_mode`` set, charge-density flags dropped, parent
+    rebound), with only ``relax``/``vc-relax`` additionally reducing ``upscale``.
+    """
+    plan = _pass_pw_plan(parameters, tried, restart, parent_mode, structure_from_output, rattle_now)
+    if error is not PwErrors.STOPPED_BY_MONITOR:
+        return plan
+    if diagnostics is None or diagnostics.get_dict().get('reason') != ACCURACY_STUCK_REASON:
+        return plan
+    calculation = parameters.get('CONTROL', {}).get('calculation', 'scf')
+    updated = _pw_parameters(parameters)
+    if calculation in ('relax', 'vc-relax'):
+        upscale = updated.get('IONS', {}).get('upscale', _UPSCALE_DEFAULT)
+        if upscale <= 1:
+            return plan
+        updated.setdefault('IONS', {})['upscale'] = max(int(upscale * _UPSCALE_MONITOR_FACTOR), 1)
+    # A full restart reuses the charge density on disk, never the input flags.
+    updated['CONTROL']['restart_mode'] = 'restart'
+    updated['ELECTRONS'].pop('startingpot', None)
+    updated['ELECTRONS'].pop('startingwfc', None)
     plan['parameters'] = updated
     plan['restart'] = True
     plan['parent_mode'] = 'remote'
@@ -1099,7 +1158,7 @@ def rattle_positions(structure: orm.StructureData, stdev: float) -> orm.Structur
     return rattled
 
 
-pw_calc = task(PwCalculation, inputs={'pseudos': orm.DataDict}, errors=PwErrors)
+pw_calc = task(PwCalculation, inputs={'pseudos': orm.DataDict, 'monitors': orm.DataDict}, errors=PwErrors)
 ph_calc = task(PhCalculation, errors=PhErrors)
 neb_calc = task(NebCalculation, inputs={'pw': {'pseudos': orm.DataDict}}, errors=NebErrors)
 q2r_calc = task(Q2rCalculation)
@@ -1120,17 +1179,21 @@ def pw_base_graph(
     kpoints_distance: float | None = None,
     kpoints_force_parity: bool = False,
     parent_folder: orm.RemoteData | None = None,
+    monitors: orm.DataDict | None = None,
     max_iterations: int = 5,
 ) -> dict:
     """Run ``pw.x`` with automated restarts, returning the outputs plus a report.
 
     This is the reusable native restart loop for composite graphs: restarts that
     need the failed run's outputs (walltime full restarts, ionic output-structure
-    restarts, electronic full restarts) rebind the preserved ``remote_folder`` and
-    ``output_structure`` and recover; ``require_pw_restart_nodes`` fails loudly
+    restarts, electronic full restarts, monitor-stuck upscale restarts) rebind the
+    preserved ``remote_folder`` and ``output_structure`` and recover;
+    ``require_pw_restart_nodes`` fails loudly
     only when the failed run genuinely never stored the needed node.
     ``parameters`` accepts a plain ``dict`` or an ``orm.Dict``. Scheduler options
-    travel in ``task_metadata`` keyed by placement name at launch.
+    travel in ``task_metadata`` keyed by placement name at launch. ``monitors`` is an
+    optional ``DataDict`` forwarded into the ``CalcJob`` ``monitors`` namespace;
+    omit it (or pass an empty mapping) and the placements run unmonitored.
     """
     if kpoints is None:
         resolved_kpoints = gen_kpoints(
@@ -1147,6 +1210,7 @@ def pw_base_graph(
         settings=settings,
         kpoints=resolved_kpoints,
         parent_folder=parent_folder,
+        monitors=monitors,
     )
     plan_walltime = handle_pw_walltime(error=run.error, parameters=parameters, tried=tried)
     plan_diagonalization = handle_pw_diagonalization(
@@ -1167,17 +1231,27 @@ def pw_base_graph(
         structure_from_output=plan_diagonalization.structure_from_output,
         rattle_now=plan_diagonalization.rattle_now,
     )
-    plan_ionic = handle_pw_ionic_convergence(
+    plan_monitor = handle_pw_monitor_stuck(
         error=run.error,
         parameters=plan_electronic.parameters,
         tried=plan_electronic.tried,
-        rattled=False,
-        output_parameters=run.output_parameters,
-        initial_parameters=parameters,
+        diagnostics=run.monitor_diagnostics,
         restart=plan_electronic.restart,
         parent_mode=plan_electronic.parent_mode,
         structure_from_output=plan_electronic.structure_from_output,
         rattle_now=plan_electronic.rattle_now,
+    )
+    plan_ionic = handle_pw_ionic_convergence(
+        error=run.error,
+        parameters=plan_monitor.parameters,
+        tried=plan_monitor.tried,
+        rattled=False,
+        output_parameters=run.output_parameters,
+        initial_parameters=parameters,
+        restart=plan_monitor.restart,
+        parent_mode=plan_monitor.parent_mode,
+        structure_from_output=plan_monitor.structure_from_output,
+        rattle_now=plan_monitor.rattle_now,
     )
     plan_bands = check_pw_sufficient_bands(
         error=run.error,
@@ -1236,6 +1310,7 @@ def pw_base_graph(
             settings=settings,
             kpoints=resolved_kpoints,
             parent_folder=parent,
+            monitors=monitors,
         )
         plan_walltime = handle_pw_walltime(error=run.error, parameters=final.parameters, tried=final.tried)
         plan_diagonalization = handle_pw_diagonalization(
@@ -1256,17 +1331,27 @@ def pw_base_graph(
             structure_from_output=plan_diagonalization.structure_from_output,
             rattle_now=plan_diagonalization.rattle_now,
         )
-        plan_ionic = handle_pw_ionic_convergence(
+        plan_monitor = handle_pw_monitor_stuck(
             error=run.error,
             parameters=plan_electronic.parameters,
             tried=plan_electronic.tried,
-            rattled=final.rattled,
-            output_parameters=run.output_parameters,
-            initial_parameters=parameters,
+            diagnostics=run.monitor_diagnostics,
             restart=plan_electronic.restart,
             parent_mode=plan_electronic.parent_mode,
             structure_from_output=plan_electronic.structure_from_output,
             rattle_now=plan_electronic.rattle_now,
+        )
+        plan_ionic = handle_pw_ionic_convergence(
+            error=run.error,
+            parameters=plan_monitor.parameters,
+            tried=plan_monitor.tried,
+            rattled=final.rattled,
+            output_parameters=run.output_parameters,
+            initial_parameters=parameters,
+            restart=plan_monitor.restart,
+            parent_mode=plan_monitor.parent_mode,
+            structure_from_output=plan_monitor.structure_from_output,
+            rattle_now=plan_monitor.rattle_now,
         )
         plan_bands = check_pw_sufficient_bands(
             error=run.error,

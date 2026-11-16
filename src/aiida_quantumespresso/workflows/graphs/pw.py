@@ -57,7 +57,9 @@ Honest limits of this rewrite (see ``reports/refinement-composites.md``):
   ERROR_TASK_FAILED``. Outcomes are reported through the ``report`` output.
 * Input validators moved into ``@task`` bodies and now surface as task failures,
   not launch-time ``ValidationError``s. There is no ``clean_workdir`` handling,
-  no ``dry_run``, and no monitor wiring.
+  no ``dry_run``. ``monitors`` is an optional shared ``DataDict`` forwarded into
+  every nested ``pw_base_graph`` (initial, main-loop, SCF, bands); per-stage
+  overrides fall back to the shared mapping.
 * ``scf``-mode relax echoes the input structure as ``output_structure`` where the
   legacy chain emits none.
 """
@@ -303,6 +305,7 @@ def init_relax_guarded(
     kpoints_distance: Float | None = None,
     settings: Dict | None = None,
     parent_folder: RemoteData | None = None,
+    monitors: DataDict | None = None,
 ) -> StructureData:
     """Run one initial relaxation and guarantee its output structure.
 
@@ -314,6 +317,7 @@ def init_relax_guarded(
     :param kpoints_distance: mesh density, if any.
     :param settings: the ``pw.settings``, if any.
     :param parent_folder: the ``pw.parent_folder``, if any.
+    :param monitors: optional shared monitors forwarded into the base run.
     :return: the relaxed structure.
     """
     initial = pw_base_graph(
@@ -325,6 +329,7 @@ def init_relax_guarded(
         kpoints=kpoints,
         kpoints_distance=kpoints_distance,
         parent_folder=parent_folder,
+        monitors=monitors,
     )
     return ensure_structure(candidate=initial.output_structure)
 
@@ -344,6 +349,8 @@ def pw_relax_graph(
     parent_folder: RemoteData | None = None,
     run_init_relax: bool = False,
     init_parameters: Dict | None = None,
+    monitors: DataDict | None = None,
+    init_monitors: DataDict | None = None,
 ) -> RelaxOutputs:
     """Relax a structure through repeated native base runs, then report.
 
@@ -367,6 +374,8 @@ def pw_relax_graph(
     :param parent_folder: the ``pw.parent_folder`` shared by every run, if any.
     :param run_init_relax: whether to run the initial relaxation.
     :param init_parameters: the parameters of the initial relaxation, defaulting to ``parameters``.
+    :param monitors: optional shared monitors forwarded into every nested base run.
+    :param init_monitors: optional initial-relax monitors, defaulting to ``monitors``.
     :return: the relaxed structure and the summary report.
     """
     current = structure
@@ -380,6 +389,7 @@ def pw_relax_graph(
             kpoints_distance=kpoints_distance,
             settings=settings,
             parent_folder=parent_folder,
+            monitors=init_monitors if init_monitors is not None else monitors,
         )
     params = parameters
     attempts = 0
@@ -395,6 +405,7 @@ def pw_relax_graph(
             kpoints_distance=kpoints_distance,
             kpoints_force_parity=kpoints_force_parity,
             parent_folder=parent_folder,
+            monitors=monitors,
         )
         decision = prepare_next_relax(
             parameters=params,
@@ -433,6 +444,9 @@ def pw_bands_graph(
     nbands_factor: Float | None = None,
     scf_settings: Dict | None = None,
     bands_settings: Dict | None = None,
+    monitors: DataDict | None = None,
+    scf_monitors: DataDict | None = None,
+    bands_monitors: DataDict | None = None,
 ) -> BandsOutputs:
     """Compute a band structure along a SeekPath path (or explicit k-points) through SCF plus bands runs.
 
@@ -454,6 +468,9 @@ def pw_bands_graph(
     :param nbands_factor: multiplier of the SCF band count for the bands run, if any.
     :param scf_settings: the SCF ``pw.settings``, if any.
     :param bands_settings: the bands ``pw.settings``, if any.
+    :param monitors: optional shared monitors forwarded into both nested base runs.
+    :param scf_monitors: optional SCF monitors, defaulting to ``monitors``.
+    :param bands_monitors: optional bands monitors, defaulting to ``monitors``.
     :return: the band structure, both parameter sets, and the SeekPath products when computed.
     """
     path = prepare_kpoints_path(
@@ -471,6 +488,7 @@ def pw_bands_graph(
         settings=scf_settings,
         kpoints=scf_kpoints,
         kpoints_distance=scf_kpoints_distance,
+        monitors=scf_monitors if scf_monitors is not None else monitors,
     )
     resolved = resolve_bands_parameters(
         scf_output_parameters=scf.output_parameters, bands_parameters=bands_parameters, nbands_factor=nbands_factor
@@ -483,6 +501,7 @@ def pw_bands_graph(
         settings=bands_settings,
         kpoints=path.explicit_kpoints,
         parent_folder=scf.remote_folder,
+        monitors=bands_monitors if bands_monitors is not None else monitors,
     )
     return {
         'band_structure': bands.output_band,

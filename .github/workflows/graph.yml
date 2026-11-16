@@ -11,7 +11,7 @@ permissions:
 
 env:
     # Released core 2.8 has no graph API. Keep this integration revision exact.
-    CORE_REV: d2045e4ff2932725796e04801df4727ba72d5db3
+    CORE_REV: 3e5947cc73ea3f6bb442b04b8d9dbbf3066ab9d2
     CORE_REPO: agoscinski/aiida-core
     AIIDA_WARN_v3: 1
 

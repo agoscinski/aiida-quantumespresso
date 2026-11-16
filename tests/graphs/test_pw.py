@@ -127,6 +127,7 @@ def stub_pw_base(
     kpoints_distance: Float | None = None,
     kpoints_force_parity: bool = False,
     parent_folder: RemoteData | None = None,
+    monitors: DataDict | None = None,
 ) -> StubPwOutputs:
     """Deterministic stand-in for ``pw_base_graph``: echo the band count, scale the cell, fabricate the rest."""
     params = parameters.get_dict()

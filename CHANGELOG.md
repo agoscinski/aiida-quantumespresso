@@ -1,5 +1,18 @@
 ## Unreleased
 
+### Experimental graph improvements
+
+* Add plain `get_inputs_from_protocol` submission mappings, including offline
+  explicit pseudos or installed pseudo families, cutoffs, per-atom thresholds,
+  spin/electronic settings, and typed monitor inputs. Unsupported options fail
+  explicitly rather than being silently dropped.
+* Native PW recovery uses opt-in structured `accuracy_stuck` diagnostics instead
+  of message prefixes; the legacy monitor's default string result is unchanged.
+* Independent scheduler settings for reused native base subgraphs now survive
+  retries through scoped `task_metadata` rules (requires the pinned core).
+* Add externally owned post-termination cleanup and PH output merging helpers.
+  These do not automatically run on cancellation or replace graph return outputs.
+
 ### Breaking changes (experimental graph API only)
 
 * `workflows.graphs.base.pw_base_graph` and `neb_base_graph` now accept

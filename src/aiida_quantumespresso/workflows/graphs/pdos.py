@@ -65,7 +65,9 @@ Honest limits of this rewrite (see ``reports/refinement-composites.md``):
   ``deltae`` across DOS and PROJWFC is enforced by
   :func:`resolve_post_windows`, which resolves both mappings from one window
   and returns them together.
-* There is no ``dry_run`` and no monitor wiring. Protocol presets live in
+* There is no ``dry_run``. ``monitors`` is an optional shared ``DataDict`` forwarded
+  into every nested ``pw_base_graph`` (SCF and NSCF); per-stage overrides fall
+  back to the shared mapping. Protocol presets live in
   :mod:`aiida_quantumespresso.workflows.graphs.protocols` as plain mappings;
   pseudo-family and meta-parameter resolution still needs the caller.
 """
@@ -415,6 +417,7 @@ def pdos_stage_parallel(
     nbands_factor: float | None = None,
     stages: int = 1,
     clean_workdir: bool = False,
+    monitors: DataDict | None = None,
 ) -> PdosStageOutputs:
     """Run NSCF then DOS and PROJWFC concurrently from one parent folder, then report.
 
@@ -441,6 +444,7 @@ def pdos_stage_parallel(
     :param nbands_factor: the multiplier of the parent band count, if any.
     :param stages: how many PW base runs the calling root placed.
     :param clean_workdir: whether to sweep the remotes at the end.
+    :param monitors: optional monitors forwarded into the NSCF base run.
     :return: the NSCF, DOS, and PROJWFC products plus the summary report.
     """
     resolved_nscf_parameters = resolve_nscf_parameters(
@@ -457,6 +461,7 @@ def pdos_stage_parallel(
         kpoints=nscf_kpoints,
         kpoints_distance=nscf_kpoints_distance,
         parent_folder=parent_folder,
+        monitors=monitors,
     )
     window = extract_nscf_window(output_parameters=nscf_run.output_parameters, output_band=nscf_run.output_band)
     matched = resolve_post_windows(
@@ -533,6 +538,7 @@ def pdos_stage_serial(
     nbands_factor: float | None = None,
     stages: int = 1,
     clean_workdir: bool = False,
+    monitors: DataDict | None = None,
 ) -> PdosStageOutputs:
     """Run NSCF then DOS, sweep DOS, then PROJWFC from one parent folder, then report.
 
@@ -560,6 +566,7 @@ def pdos_stage_serial(
     :param nbands_factor: the multiplier of the parent band count, if any.
     :param stages: how many PW base runs the calling root placed.
     :param clean_workdir: whether to sweep the remaining remotes at the end.
+    :param monitors: optional monitors forwarded into the NSCF base run.
     :return: the NSCF, DOS, and PROJWFC products plus the summary report.
     """
     resolved_nscf_parameters = resolve_nscf_parameters(
@@ -576,6 +583,7 @@ def pdos_stage_serial(
         kpoints=nscf_kpoints,
         kpoints_distance=nscf_kpoints_distance,
         parent_folder=parent_folder,
+        monitors=monitors,
     )
     window = extract_nscf_window(output_parameters=nscf_run.output_parameters, output_band=nscf_run.output_band)
     matched = resolve_post_windows(
@@ -661,6 +669,9 @@ def pdos_from_scratch_parallel(
     energy_range_vs_fermi: list | None = None,
     nbands_factor: float | None = None,
     clean_workdir: bool = False,
+    monitors: DataDict | None = None,
+    scf_monitors: DataDict | None = None,
+    nscf_monitors: DataDict | None = None,
 ) -> PdosFromScratchOutputs:
     """Compute total and partial densities of states, running SCF first, DOS/PROJWFC concurrently.
 
@@ -689,6 +700,9 @@ def pdos_from_scratch_parallel(
     :param energy_range_vs_fermi: the energy range around the Fermi level to cover, if any.
     :param nbands_factor: the multiplier of the parent band count, if any.
     :param clean_workdir: whether to sweep the remotes at the end.
+    :param monitors: optional shared monitors forwarded into SCF and NSCF base runs.
+    :param scf_monitors: optional SCF monitors, defaulting to ``monitors``.
+    :param nscf_monitors: optional NSCF monitors, defaulting to ``monitors``.
     :return: the SCF products, the stage products, and the summary report.
     """
     checked_scf_parameters = require_scf_parameters(parameters=scf_parameters)
@@ -700,6 +714,7 @@ def pdos_from_scratch_parallel(
         settings=scf_settings,
         kpoints=scf_kpoints,
         kpoints_distance=scf_kpoints_distance,
+        monitors=scf_monitors if scf_monitors is not None else monitors,
     )
     stage = pdos_stage_parallel(
         structure=structure,
@@ -721,6 +736,7 @@ def pdos_from_scratch_parallel(
         nbands_factor=nbands_factor,
         stages=2,
         clean_workdir=clean_workdir,
+        monitors=nscf_monitors if nscf_monitors is not None else monitors,
     )
     scf_final = sweep_remote(folder=scf_run.remote_folder, enabled=clean_workdir, after=stage)  # noqa: F841
     return {
@@ -768,6 +784,9 @@ def pdos_from_scratch_serial(
     energy_range_vs_fermi: list | None = None,
     nbands_factor: float | None = None,
     clean_workdir: bool = False,
+    monitors: DataDict | None = None,
+    scf_monitors: DataDict | None = None,
+    nscf_monitors: DataDict | None = None,
 ) -> PdosFromScratchOutputs:
     """Compute total and partial densities of states, running SCF first, DOS before PROJWFC.
 
@@ -796,6 +815,9 @@ def pdos_from_scratch_serial(
     :param energy_range_vs_fermi: the energy range around the Fermi level to cover, if any.
     :param nbands_factor: the multiplier of the parent band count, if any.
     :param clean_workdir: whether to sweep the remaining remotes at the end.
+    :param monitors: optional shared monitors forwarded into SCF and NSCF base runs.
+    :param scf_monitors: optional SCF monitors, defaulting to ``monitors``.
+    :param nscf_monitors: optional NSCF monitors, defaulting to ``monitors``.
     :return: the SCF products, the stage products, and the summary report.
     """
     checked_scf_parameters = require_scf_parameters(parameters=scf_parameters)
@@ -807,6 +829,7 @@ def pdos_from_scratch_serial(
         settings=scf_settings,
         kpoints=scf_kpoints,
         kpoints_distance=scf_kpoints_distance,
+        monitors=scf_monitors if scf_monitors is not None else monitors,
     )
     stage = pdos_stage_serial(
         structure=structure,
@@ -828,6 +851,7 @@ def pdos_from_scratch_serial(
         nbands_factor=nbands_factor,
         stages=2,
         clean_workdir=clean_workdir,
+        monitors=nscf_monitors if nscf_monitors is not None else monitors,
     )
     scf_swept = sweep_remote(folder=scf_run.remote_folder, enabled=True, after=stage)
     scf_final = sweep_remote(folder=scf_run.remote_folder, enabled=clean_workdir, after=scf_swept)  # noqa: F841
@@ -878,6 +902,7 @@ def pdos_from_parent_parallel(
     energy_range_vs_fermi: list | None = None,
     nbands_factor: float | None = None,
     clean_workdir: bool = False,
+    monitors: DataDict | None = None,
 ) -> PdosFromParentOutputs:
     """Compute total and partial densities of states from a caller-provided folder, concurrently.
 
@@ -904,6 +929,7 @@ def pdos_from_parent_parallel(
     :param energy_range_vs_fermi: the energy range around the Fermi level to cover, if any.
     :param nbands_factor: the multiplier of the parent band count, if any.
     :param clean_workdir: whether to sweep the remotes at the end.
+    :param monitors: optional monitors forwarded into the NSCF base run.
     :return: the stage products and the summary report.
     """
     stage = pdos_stage_parallel(
@@ -926,6 +952,7 @@ def pdos_from_parent_parallel(
         nbands_factor=nbands_factor,
         stages=1,
         clean_workdir=clean_workdir,
+        monitors=monitors,
     )
     return {
         'nscf_remote_folder': stage.nscf_remote_folder,
@@ -967,6 +994,7 @@ def pdos_from_parent_serial(
     energy_range_vs_fermi: list | None = None,
     nbands_factor: float | None = None,
     clean_workdir: bool = False,
+    monitors: DataDict | None = None,
 ) -> PdosFromParentOutputs:
     """Compute total and partial densities of states from a caller-provided folder, DOS before PROJWFC.
 
@@ -991,6 +1019,7 @@ def pdos_from_parent_serial(
     :param energy_range_vs_fermi: the energy range around the Fermi level to cover, if any.
     :param nbands_factor: the multiplier of the parent band count, if any.
     :param clean_workdir: whether to sweep the remaining remotes at the end.
+    :param monitors: optional monitors forwarded into the NSCF base run.
     :return: the stage products and the summary report.
     """
     stage = pdos_stage_serial(
@@ -1013,6 +1042,7 @@ def pdos_from_parent_serial(
         nbands_factor=nbands_factor,
         stages=1,
         clean_workdir=clean_workdir,
+        monitors=monitors,
     )
     return {
         'nscf_remote_folder': stage.nscf_remote_folder,

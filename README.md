@@ -19,7 +19,11 @@ Go through [the quick start tutorial](https://aiida-quantumespresso.readthedocs.
 `aiida_quantumespresso.workflows.graphs` provides native graph alternatives for the
 nine workflow families, without placing or importing legacy WorkChains. PW/NEB
 accept general pseudopotential mappings; PDOS offers explicit serial/parallel
-roots. **The migration is not feature-complete or a drop-in replacement.**
+roots. Plain `get_inputs_from_protocol` helpers resolve supported launch inputs,
+including structured monitor settings and independent per-stage scheduler options.
+External `cleanup_graph_workdirs` and `merge_ph_graph_outputs` helpers provide
+explicit post-termination cleanup and PH post-processing; they are not automatic
+lifecycle hooks. **The migration is not feature-complete or a drop-in replacement.**
 Legacy workflow entry points remain unchanged. Graphs require the exact
 experimental core revision pinned in `.github/workflows/graph.yml`.
 See the [migration and verification report](reports/graph-migration.md) for coverage,

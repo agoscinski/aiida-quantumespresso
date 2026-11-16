@@ -177,11 +177,12 @@ def stub_pw_base(
     kpoints: KpointsData | None = None,
     kpoints_distance: Float | None = None,
     parent_folder: RemoteData | None = None,
+    monitors: DataDict | None = None,
 ) -> StubPwOutputs:
     """Stand-in for ``pw_base_graph``: echo the band count, fabricate bands spanning the DOS window."""
     from aiida.orm import Float as OrmFloat  # noqa: F401  (keeps the stub import-local)
 
-    del code, structure, pseudos, settings, kpoints, kpoints_distance, parent_folder
+    del code, structure, pseudos, settings, kpoints, kpoints_distance, parent_folder, monitors
     nbnd = int(parameters.get_dict().get('SYSTEM', {}).get('nbnd', 8))
     kpoints_node = KpointsData()
     kpoints_node.set_kpoints([(0.0, 0.0, 0.0), (0.5, 0.0, 0.0)])
