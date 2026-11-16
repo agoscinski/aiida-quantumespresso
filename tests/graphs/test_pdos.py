@@ -249,7 +249,8 @@ def _substitute_all(monkeypatch) -> None:
     the graph handles, so they are reset (restored afterwards by
     ``monkeypatch``) to force recompilation against the substitutes.
     """
-    monkeypatch.setattr(pdos_module, 'pw_base_graph', stub_pw_base)
+    monkeypatch.setattr(pdos_module, 'scf', stub_pw_base)
+    monkeypatch.setattr(pdos_module, 'nscf', stub_pw_base)
     monkeypatch.setattr(pdos_module, 'dos_calc', stub_dos)
     monkeypatch.setattr(pdos_module, 'projwfc_calc', stub_projwfc)
     for handle in (
@@ -281,8 +282,40 @@ def test_build_from_parent_graphs() -> None:
     assert pdos_from_parent_serial.build() is None
 
 
+def _calcjob_paths(template) -> set:
+    """Return every ``CalcJob`` placement path of a compiled template.
+
+    Each path descends one level per authored subgraph callee alias and ends
+    at the ``CalcJob`` placement alias; branch and loop control frames are
+    transparent and contribute no level of their own.
+    """
+    from aiida.engine import CalcJob
+    from aiida.engine.processes.graphs.ir import BranchControl, LoopControl, ProcessTask, SubgraphTask
+
+    found = set()
+
+    def _visit(current, scope: tuple) -> None:
+        if isinstance(current, ProcessTask):
+            if issubclass(current.spec.process_class, CalcJob):
+                found.add((*scope, current.name))
+        elif isinstance(current, SubgraphTask):
+            for nested in current.body.tasks:
+                _visit(nested, (*scope, current.name))
+        elif isinstance(current, BranchControl):
+            for body in current.branches:
+                for nested in body.tasks:
+                    _visit(nested, scope)
+        elif isinstance(current, LoopControl):
+            for nested in current.body.tasks:
+                _visit(nested, scope)
+
+    for current in template.tasks:
+        _visit(current, ())
+    return found
+
+
 def test_post_placements_keep_task_metadata_names() -> None:
-    """The calculation placements keep their names so one ``task_metadata`` entry covers every graph."""
+    """The calculation placements keep their names so one nested scope entry covers every graph."""
     from aiida.engine.processes.graphs.ir import ProcessTask, SubgraphTask
     from aiida.engine.processes.graphs.lowering import compile_graph
 
@@ -307,6 +340,45 @@ def test_post_placements_keep_task_metadata_names() -> None:
             if placement.spec.identifier in ('DosCalculation', 'ProjwfcCalculation'):
                 names.add(placement.name)
     assert names == {'dos_calc', 'projwfc_calc'}
+
+
+def test_stage_scopes_follow_authored_aliases() -> None:
+    """The compiled PDOS stages address NSCF/DOS/PROJWFC through authored aliases.
+
+    The checks compile the production graphs themselves (no copies): the NSCF
+    base run descends through the ``nscf`` alias to the shared ``pw_calc``
+    leaf, the post-processing placements keep their stable names, and no
+    placement calls ``pw_base_graph`` directly or carries a generated suffix.
+    """
+    from aiida.engine.processes.graphs.lowering import compile_graph
+
+    expected_stage = {('nscf', 'pw_calc'), ('dos_calc',), ('projwfc_calc',)}
+    assert _calcjob_paths(compile_graph(pdos_stage_parallel)) == expected_stage
+    assert _calcjob_paths(compile_graph(pdos_stage_serial)) == expected_stage
+
+
+def test_roots_nest_stage_beside_scf_scope() -> None:
+    """The compiled from-scratch roots nest the stage scope beside the SCF scope.
+
+    The from-parent roots carry only the stage scope. Both variants address
+    every ``CalcJob`` placement exactly once with no generated suffixes.
+    """
+    from aiida.engine.processes.graphs.lowering import compile_graph
+
+    expected_stage = {('nscf', 'pw_calc'), ('dos_calc',), ('projwfc_calc',)}
+    for root, stage in (
+        (pdos_from_scratch_parallel, 'pdos_stage_parallel'),
+        (pdos_from_scratch_serial, 'pdos_stage_serial'),
+    ):
+        assert _calcjob_paths(compile_graph(root)) == {
+            ('scf', 'pw_calc'),
+            *[(stage, *path) for path in expected_stage],
+        }
+    for root, stage in (
+        (pdos_from_parent_parallel, 'pdos_stage_parallel'),
+        (pdos_from_parent_serial, 'pdos_stage_serial'),
+    ):
+        assert _calcjob_paths(compile_graph(root)) == {(stage, *path) for path in expected_stage}
 
 
 def test_serial_stage_orders_dos_before_projwfc() -> None:

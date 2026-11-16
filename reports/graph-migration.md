@@ -1,161 +1,112 @@
-# Native QE graphs — third refinement and validation
-
-## Follow-up: static pseudopotential inputs only
-
-PW/CP now declare `pseudos` as a static `DataDict` input on core 3; NEB inherits
-that port under its static `pw` namespace. Graphs no longer declare or expand a
-pseudopotential namespace. Each CalcJob links to the owning container instead of
-individual pseudo members. Plain mapping launches remain accepted through a
-serializer. Homogeneous legacy or aiida-pseudo UPF members are supported; mixing
-those concrete node types in one container is not. The core-2.x namespace remains
-for stable compatibility.
-
-**CalcJob monitor inputs, runtime, and provenance are unchanged.** Any static
-monitor experiment from this follow-up was reverted. Monitor forwarding still
-uses the existing adapter. Outputs were not changed.
-
-Focused post-revert validation: **38 core tests and 99 QE tests passed**; both
-repositories' relevant pre-commit hooks passed. Supporting core commit
-`104f5b7bf1959cb5e98154e3137d55f691fc7832` fixes builder `_update` for mapping-valued
-leaf ports and file staging of unstored owned members. The new CI pin requires
-that core commit to be pushed before running remote CI. These follow-up changes
-are committed locally, not pushed; the CI results below belong to the prior round.
-
----
+# Native QE graph rewrite — structured configuration iteration
 
 ## Verdict
 
-**Native, without WorkChains, but not feature-complete or legacy-API compatible.**
-The updated `graph-layer-audit-response.md` is the checklist for this round.
-Missing QE implementations are not presented as missing core authoring features.
-Legacy workflow entry points remain available; native graphs never call them.
+**Native graphs use no WorkChains, but the rewrite is not feature-complete.**
+This iteration first implements `task.md` in core, then adapts QE authoring to that
+contract rather than adding further engine features for QE-specific behavior.
+Legacy workflow entry points remain available and are not called by native graphs.
 
-Required core: **`3e5947cc73ea3f6bb442b04b8d9dbbf3066ab9d2`**, pushed to
-`agoscinski/aiida-core`, branch `refactor/graph-qe-round3`. This includes the
-previous failed-output/namespace fixes and the narrowly scoped metadata improvement
-below. The earlier core branch was preserved after a non-fast-forward push rejection;
-no remote history was overwritten. Dedicated QE graph CI pins this exact revision.
-Released core 2.8 does not provide these graph APIs; the stable dependency remains
-unchanged for legacy entry points.
+## Iteration 1: one focused core replacement
 
-## Changes following the updated response
+Core feature commit: **`062b26173b30ae29714dd6c2f63f1a6d4a5b839f`**.
+Pushed integration branch: `agoscinski/aiida-core@refactor/structured-graph-metadata`.
+QE's exact dependency pin: **`955f04745d114bf4c51b219de869e1bab14b7e64`**.
+The integration head adds only the existing, separately committed DataDict builder
+and file-staging fixes after the focused metadata feature.
 
-### 1. Real QE protocol-to-launch arguments
+The old exact-label, wildcard-default, and iteration-normalization commits
+(`721c73b4d`, `184c05f71`, `be06c00fe`) are absent from this replacement branch's
+ancestry. Namespace-forwarding (`fe808f614`) and failed-output (`bc362ddce`) commits
+keep their original hashes. The tracked final tree was verified identical before
+and after history consolidation.
 
-`graphs.protocols.get_inputs_from_protocol` now returns arguments usable with
-`run_get_node`/`submit` for relax, bands, and matching serial/parallel/from-parent
-PDOS roots. It does not construct builders or run legacy WorkChains.
+A pre-existing unfinished rebase was discovered in the original core worktree.
+It was left intact. The replacement was committed and pushed from a separate
+worktree, `/tmp/aiida-structured-metadata`; no existing remote branch was forced.
+The original worktree retains the validated source edits for local review/testing.
 
-Implemented and tested: raw-YAML defaults/overrides, explicit pseudos or installed
-pseudo-family selection, recommended cutoffs, per-atom convergence thresholds,
-electronic/spin/relax settings, k-point distances/settings, codes, optional monitor
-inputs, and scheduler metadata. Tests use explicit pseudos or offline family
-fixtures; no pseudo downloads are required. Unsupported options fail early.
+### Scope/placement contract
 
-This is resolution for the **supported subset**, not complete legacy protocol
-parity: inner base budgets other than five, parallelization, distinct init/main
-mesh/settings, automatic electronic type, and some optional phases are still
-unsupported. Root `clean_workdir=True` for relax/bands and unrouted composite mesh
-parity are rejected rather than silently discarded. PDOS success-path cleanup is
-supported. Protocol YAML monitor conversion currently supports the accuracy-stuck
-monitor; direct graph `DataDict` inputs are the lower-level monitor interface.
+```python
+# Ordinary Python aliases outside the graph; no second naming API:
+scf = pw_base_graph
+bands = pw_base_graph
 
-### 2. Monitor inputs and machine-readable recovery
+# Corresponding native bands launch configuration:
+task_metadata = {
+    'scf': {'pw_calc': {'options': scf_options}},
+    'bands': {'pw_calc': {'options': bands_options}},
+}
+```
 
-PW base declares both `pseudos` and `monitors` as forwarded `DataDict` namespaces.
-Relax/init/bands/PDOS pass optional shared or per-stage monitors into native bases.
+Each actual nested graph call contributes one mapping level, keyed by the authored
+callee name. Repeating a metadata-bearing alias in one authored scope requires
+distinct Python aliases; generated suffixes are not configuration addresses.
+Branch/loop/map control frames are transparent, and iterations reuse the same entry.
+Runtime resolution follows persisted structural scope lineage, never provenance
+label strings. There are no wildcards, normalization, ancestor defaults, or fallback
+precedence. An authored `__` alias remains a literal valid name; an unknown flattened
+provenance label fails like any other unknown path.
 
-The existing accuracy-stuck monitor supports **opt-in `structured=True`**, returning
-`CalcJobMonitorResult` with an optional declared `monitor_diagnostics: Dict` output.
-The diagnostic contains `reason='accuracy_stuck'`; human-readable text is not a
-recovery dispatch key. Default monitor behavior remains a string for legacy callers.
+Configuration is checked before execution: missing entries, unknown paths,
+non-mapping scopes/leaves, non-string keys, and invalid provided CalcJob metadata
+values report actionable paths. Validation and selection preserve leaf contents.
+Existing provenance label formatting is unchanged and tested independently.
 
-Native recovery maps status 150, claims only the structured accuracy-stuck reason,
-reduces `IONS.upscale` for the relevant relaxation case, and carries a full restart
-folder. Other reasons, absent diagnostics, exhausted upscale, or missing required
-restart nodes fail rather than being misclassified as accuracy-stuck recovery.
-No arbitrary child-exit-message API or new monitoring engine was added.
+**Validation:** 1021 core graph tests passed, including 25 focused configuration
+regressions. Coverage includes direct CalcJobs, reused nested graphs, three-level
+paths, loops, both branch arms, early rejection with unchanged process-node counts,
+unchanged metadata contents, and two actual scheduler-state checkpoint round-trips
+using real CalcJobs without resubmitting finished children. Ruff and mypy passed.
+These are persisted GraphRun-state checks, not a new real-daemon interruption claim.
 
-### 3. Independent scheduler settings, including retries
+## Iteration 2: QE authoring and protocol migration
 
-Distinct leaf placement names already supported distinct metadata. The actual
-problem was reused nested graphs sharing the inner name `pw_calc`.
+Only QE code changed for this iteration; no additional core feature was needed.
+Native composites now call base graphs through authored aliases:
 
-Core now resolves `task_metadata` by:
+- Bands: `scf`, `bands`.
+- Relaxation: `initial` inside `init_relax_guarded`, and `main` inside the loop.
+- PDOS: `scf` at the root, `nscf` inside the serial/parallel stage.
 
-1. Exact hierarchical execution label.
-2. Longest matching explicit `<scope>__*` prefix (loop iteration indices normalized).
-3. The exact leaf placement name, preserving existing callers.
+Protocol helpers produce exactly the nested contract, with no old flat aliases or
+wildcard keys. Empty leaf mappings are retained; only explicit `None` entries are
+omitted. Invalid protocol metadata receives a boundary error rather than an internal
+merge exception. The prior shared init/main scheduler-options rejection was removed:
+a production nested run verifies initial walltime 1111 and main walltime 2222 on
+the actual substituted external CalcJobs. SCF/bands and SCF/NSCF retry tests likewise
+verify separate settings under reused native base graphs.
 
-No arbitrary glob syntax or dynamic per-attempt resource adaptation was added.
-The protocol helper emits scoped defaults for SCF/bands and SCF/NSCF, so settings
-remain distinct when either native base retries. Independent reviewers caught the
-initial exact-label-only aliases losing stage settings on retries; this is fixed
-and exercised through production nested graphs. The coordinator also removed an
-unsafe numeric-suffix fallback that could silently reuse another placement's options.
+See [structured-metadata-migration.md](structured-metadata-migration.md) for exact
+per-root mappings and the worker division. Tests compile production graphs and
+execute their native base loops; they do not copy production graph bodies.
 
-### 4. Cleanup ownership: an explicit policy, not an automatic guarantee
+### Preserved contracts and earlier verified work
 
-`graphs.cleanup.cleanup_graph_workdirs(node)` is an ordinary external-owner helper
-for a **terminated** graph. It handles stored descendants after success, mapped or
-unmapped failure, and cancellation; it refuses a running root or active descendants.
-It is idempotent and records expected filesystem/configuration failures per CalcJob
-without changing process state or exit status. Unexpected programming errors can
-still propagate. Cleanup is attempted once per folder; transport operations retain
-their own timeout behavior.
+- PW/CP `pseudos` is one static DataDict input on core 3; NEB inherits it under
+  static `pw`. Core 2.x retains the legacy namespace for released compatibility.
+  Pseudos no longer require graph namespace forwarding. Plain mapping launches
+  serialize to owned members; mixed concrete legacy/aiida-pseudo node classes in
+  one homogeneous container are unsupported.
+- **CalcJob monitor specification/runtime/provenance is unchanged.** Existing
+  graph monitor forwarding remains. Opt-in structured accuracy-stuck diagnostics,
+  not message prefixes, select native monitor recovery.
+- Mapped failed-process outputs remain available next to the error arm; native
+  recovery consumes stored restart folders and structures with missing-node guards.
+- Serial PDOS remains DOS → sweep → PROJWFC; parallel PDOS uses independent calls.
+- Cleanup after unexpected failure/cancellation still requires an external owner
+  after termination. Successful-path tasks are not automatic termination hooks.
+- PH merging remains external provenance-preserving post-processing; it does not
+  retroactively replace the graph's stored outputs.
 
-Defensive guards refuse relative paths, filesystem/shared top-level roots, shared
-temporary roots, and the computer's literal configured work folder. Real calculation
-subdirectories below `/tmp` remain valid. These checks are **not a security sandbox**:
-stored paths and computer configuration must still be trusted. Dry-run uses the
-same refusal checks. Tests clean real temporary directories, not arbitrary fixture
-paths, and check that unrelated directories remain intact.
+## QE validation
 
-**Policy decision:** PDOS sweeps cover the successful graph paths where they are
-wired. A reusable sweep task is available for explicit handled-failure branches,
-but such a task is not automatically inserted everywhere. Unexpected failure and
-cancellation require an external owner to invoke the terminal helper after all
-children terminate. We deliberately do **not** claim legacy automatic
-`on_terminated` equivalence or cleanup after a crashed worker without owner action.
-Relax/bands protocol resolution rejects an unsupported in-graph cleanup promise.
+Initial full combined run: **191 passed**, 31 warnings, 376.13 seconds.
+Subsequent empty-leaf/boundary corrections passed their focused tests; final full
+suite and remote CI results will be recorded below after verification.
 
-### 5. PH merging: implemented external post-processing, not a root-output rewrite
-
-`graphs.ph.merge_ph_graph_outputs(node, last_calc=...)` walks a completed recovery
-chain and calls the existing merge calcfunction with each original output Dict as
-an explicit calculation input. Its tests verify direct provenance links, merge
-math, q-point range checks, initialization/single-member cases, and missing outputs.
-Disconnected PH branches require an explicit branch-end selector instead of a
-silent latest-time choice.
-
-The helper returns a post-processing Dict. The graph itself still publishes its
-last-iteration output: no stored graph outputs are retroactively changed. This is
-not full legacy result-contract parity. Owned node containers exist; their
-copy/detachment semantics are not evidence that an in-graph solution is impossible.
-No general collector API is requested on that basis.
-
-## Worker division and independent verification
-
-Four workers owned protocols, monitor/recovery, scoped metadata, and cleanup/PH.
-Two further workers reviewed integration and cleanup/PH semantics. The coordinating
-agent inspected and tested the combined tree, fixed integration issues, and reran
-complete suites rather than accepting isolated runs or unexplained 'flaky' failures.
-
-Corrections during review included retry metadata coverage, monitor plumbing through
-all composites, rejection of silently ignored launch options, cleanup authentication
-errors and dangerous roots, and ambiguous PH chain selection. Earlier worker handoff
-reports retain their intermediate results; this report is authoritative.
-
-## Validation
-
-| Check | Observed result |
-| --- | --- |
-| Complete QE graph suite, `-n 4` | **181 passed**, 33 warnings, 348.23 seconds |
-| Core graph suite, `-m presto -n 4` | **1006 passed**, 4 warnings, 110.84 seconds |
-| Legacy monitor + PW calculation tests | **51 passed**, 1 warning, 4.40 seconds |
-| Cleanup + PH helper tests | **37 passed**, 1 warning, 8.59 seconds |
-| Legacy workflow suite on this core | **89 failed, 106 passed, 1 skipped**, 30.48 seconds |
-| Repository pre-commit hooks | Core Ruff/mypy and QE Ruff lint/format passed on changed files |
+Commands from the original core worktree containing the validated source:
 
 ```sh
 uv run pytest -m presto tests/engine/processes/graphs -n 4 -q
@@ -163,63 +114,25 @@ PYTHONPATH=aiida-quantumespresso/src uv run --with aiida-pseudo --with qe-tools 
   pytest aiida-quantumespresso/tests/graphs -n 4 -q
 ```
 
-The local core suite includes existing untracked graph tests; they were not added
-to the commits. The initial serial QE run exceeded its 480-second command budget
-near completion; it is not counted as a pass. The combined parallel suite passed
-before and after final boundary/safety corrections (169, then 181 tests).
+The local core count includes pre-existing untracked graph tests; those files were
+not committed. QE external CalcJobs are deterministic local substitutes, not real
+QE scientific/scheduler validation. Both repositories' configured pre-commit hooks
+passed. Dedicated graph CI installs pytest-xdist and runs all graph tests with four
+workers; no graph tests are excluded.
 
-### What these tests establish—and what they do not
+## Remaining work
 
-Production graphs run through native PW bases with external CalcJobs substituted:
-protocol-generated inputs, monitor forwarding/structured diagnostics, first attempts
-and retries with independent scheduler options, relaxation/bands/serial PDOS,
-remote-folder rebinding, general pseudo mappings, provenance, and no WorkChain
-descendants. Core metadata tests execute actual local arithmetic CalcJobs.
-
-These are **not scientific runs of QE executables**. Monitor tests exercise the
-structured monitor result and production recovery wiring, not a complete real QE
-scheduler-poll/kill cycle. Cleanup/PH tests include constructed terminated process
-provenance; they are not daemon-crash tests. There are still deprecation/dependency
-warnings, notably the legacy monitor's `CalcJobNode.attributes` access.
-
-## Remaining work, accurately classified
-
-- **QE implementation/compatibility:** complete protocol option coverage, optional
-  bands relaxation and all outputs, status 501/710/legacy numeric exits, remaining
-  handler cases, fixed-scheduler-limit `max_seconds` preparation, prepared-input
-  inspection, and the legacy `orm.AbstractCode` protocol/core-3 failures.
-- **Chosen ownership contract:** terminal cleanup and PH merged output currently
-  require explicit external calls. Automatic legacy lifecycle/result behavior is
-  not claimed. An automatic cancellation guarantee would need a specifically
-  designed owner/termination mechanism, not merely another successful-path task.
-- **Core composability:** shared nested metadata addressing is now implemented and
-  tested. Runtime-adjustable scheduler settings should only be requested for a
-  concrete policy that changes scheduler resources—not fixed-limit preparation.
-- **Unverified framework path:** namespace forwarding in directly task-mapped
-  `par_map` remains outside this work; QE's fixed DOS/PROJWFC fan-out does not need it.
-
-Builders, protocol APIs, unrestricted graph-body Python, handler registries,
-monitoring implementations, and decorated-calcfunction placement are not missing
-prerequisites. No new broad core authoring wishlist follows from remaining QE work.
+The result is not a production-compatible replacement release. Remaining QE work
+includes complete protocol/output/optional-phase coverage, status 501/710 and other
+recovery-policy cases, fixed-scheduler-limit `max_seconds` preparation, prepared-input
+inspection, legacy numeric exits, and remaining legacy/core-3 API incompatibilities.
+Cleanup and PH merged-result ownership still differ from legacy automatic behavior.
+These are not evidence that builders, unrestricted graph-body Python, handler
+registries, or a new monitoring engine are missing core prerequisites.
 
 ## Remote verification
 
-QE source **`9d94b364a7759e8c783f193c1199225fe936cb51`** is pushed to
-`origin/rewrite`; core is pushed to `origin/refactor/graph-qe-round3`. The final
-report-only commit records the results below without changing executable source.
-`ci-verification.json` contains the observed public API job/step conclusions.
-
-| Run | Observed result |
-| --- | --- |
-| [QE stable-core CI 43934980171](https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43934980171) | **Passed:** pre-commit and Python 3.10, 3.11, 3.12, 3.13, 3.14 tests. Graph modules skip on released core, so this is stable compatibility coverage. |
-| [QE native graph CI 43934980166](https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43934980166) | Exact core revision/API gate **passed**, expanded graph-test step **passed**; legacy workflow regression step **failed**. Overall run is **red**, not a complete migration gate. |
-| [Core pre-commit 43933248450](https://github.com/agoscinski/aiida-core/actions/runs/43933248450) | **Passed.** |
-| [Core docs build 43933248183](https://github.com/agoscinski/aiida-core/actions/runs/43933248183) | **Passed.** |
-| [Broader core CI 43933247792](https://github.com/agoscinski/aiida-core/actions/runs/43933247792) | Presto, CLI, fixtures, Python 3.10/3.14 PostgreSQL+ZeroMQ, and Python 3.14 PostgreSQL+RabbitMQ jobs **passed**. Minimum-requirements Python 3.10/SQLite job **failed**; Python 3.10/PostgreSQL+RabbitMQ was still running at observation. No all-core-CI success is claimed. |
-
-Verification uses public API status/step results, not downloaded failure logs.
-The minimum-requirements failure has not been diagnosed here; it is neither hidden
-nor attributed to unrelated code without evidence. The local 89-failure legacy
-breakdown is a local reproduction, not a remote log transcript. Native tests and
-stable compatibility pass, but remaining behavior and compatibility gaps prevent
-a feature-complete verdict.
+Iteration 1 was pushed first and triggered core CI. Iteration 2 updates QE's pin to
+the already-published exact revision. Current iteration-2 source push, final suite,
+and CI observation are pending; old `ci-verification.json` results are historical
+until replaced with this iteration's observations.

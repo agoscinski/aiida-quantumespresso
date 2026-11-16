@@ -25,21 +25,25 @@ subclass or a ``ProcessBuilder``.
 
 Scheduler options are not graph inputs. The helper lifts every
 ``pw.metadata.options``/``dos.metadata.options``/``projwfc.metadata.options``
-section into the ``task_metadata`` launch mapping keyed by placement name, and
-merges the ``options`` keyword into every placement. The mapping carries both
-exact hierarchical aliases (for example ``pw_base_graph__pw_calc``) and
-``<scope>__*`` scope rules (for example ``pw_base_graph__*``) so independent
-per-stage scheduler options survive base-graph retries; exact keys stay for
-backward compatibility. See
-``reports/round3-protocols.md`` for the collaborator contract on hierarchical
-placement labels (exact ``scf__pw_calc``-style labels with leaf-name fallback).
+section into the ``task_metadata`` launch mapping as a strictly nested mapping,
+and merges the ``options`` keyword into every placement. Each authored subgraph
+callee alias adds one level (for example ``{'scf': {'pw_calc': ...}, 'bands':
+{'pw_calc': ...}}`` for the bands root); the ``CalcJob`` placement alias holds
+the normal metadata mapping at the leaf. Branch and loop control frames are
+transparent, and loop iterations reuse their placement's configuration, so no
+generated suffixes or per-iteration keys appear. The mapping covers every
+``CalcJob`` placement exactly once: unknown paths, missing entries, and
+non-mapping leaves fail loudly at launch. See
+``reports/structured-metadata-migration.md`` for the scope contract and the
+authored aliases of each production root.
 
 Monitors travel as graph inputs, not scheduler options. Each ``pw.monitors``
 YAML section holds a mapping of monitor names onto ``{'entry_point': ...,
 'kwargs': {...}}`` entries; only the known ``quantumespresso.accuracy_stuck``
 entry point is accepted and unknown fields fail fast. The helper converts each
 entry into an ``orm.Dict`` collected in an ``orm.DataDict`` and forwards it
-into every nested ``pw_base_graph`` (shared plus per-stage overrides).
+into every nested base run through its authored alias (``scf``/``bands``,
+``initial``/``main``, ``scf``/``nscf``; shared plus per-stage overrides).
 
 What is deliberately not resolved (fail fast, never silently dropped):
 
@@ -49,15 +53,13 @@ What is deliberately not resolved (fail fast, never silently dropped):
   parallelization port.
 * An inner base ``max_iterations`` other than the graph default (5) is
   rejected; only the outer budget is exposed.
-* The relax graph shares one k-point mesh and one settings mapping between the
-  initial and the main relax. Conflicting explicit overrides for those shared
-  inputs are rejected; the documented default (main mesh wins) applies
-  otherwise.
+* The relax graph shares one k-point mesh, one settings mapping, and one
+  ``kpoints_force_parity`` value between the initial and the main relax, while
+  their scheduler options resolve independently per scope (``initial`` versus
+  ``main``). Conflicting explicit overrides for the shared inputs are
+  rejected; the documented default (main mesh wins) applies otherwise.
 * ``RelaxType.VOLUME``/``POSITIONS_VOLUME`` and 2D structures outside the x-y
   plane are rejected, mirroring the legacy builder.
-* Per-scope ``pw`` scheduler options that differ between scopes are carried
-  under both the leaf key and hierarchical alias keys; independent honoring of
-  the aliases needs the scope-aware core lookup (see the report).
 """
 
 import copy
@@ -754,7 +756,9 @@ def get_inputs_from_protocol(
     The returned mapping splats directly into :func:`run_get_node`/:func:`submit`
     for the matching production root (``pw_relax_graph``, ``pw_bands_graph``,
     or a ``pdos_from_*`` root): graph arguments as plain values and ORM nodes,
-    plus a ``task_metadata`` entry keyed by placement name. Pseudo, cutoff,
+    plus a strictly nested ``task_metadata`` entry (one level per authored
+    subgraph callee alias, the ``CalcJob`` metadata mapping at each leaf).
+    Pseudo, cutoff,
     threshold, k-point, and spin resolution mirrors
     ``PwBaseWorkChain.get_builder_from_protocol`` without importing it.
 
@@ -781,7 +785,7 @@ def get_inputs_from_protocol(
     :param nscf_kpoints: explicit NSCF mesh for ``'pdos'``.
     :param parent_folder: when given for ``'pdos'``, build from-parent inputs instead of from-scratch.
     :param parent_output_parameters: parent ``output_parameters`` for the PDOS band-count rule.
-    :param serial: select the serial PDOS root (and its ``task_metadata`` alias prefixes).
+    :param serial: select the serial PDOS root (and its ``task_metadata`` stage scope).
     :param options: scheduler options merged into every CalcJob placement.
     :param task_metadata: explicit placement metadata merged last, winning on conflicts.
     :param monitors: shared monitors forwarded into every nested ``pw_base_graph`` unless a
@@ -958,7 +962,15 @@ def _merge_task_metadata(*mappings: dict | None) -> dict:
     """Merge placement metadata mappings left to right, with the rightmost winning."""
     merged: dict[str, dict] = {}
     for mapping in mappings:
-        for placement, metadata in (mapping or {}).items():
+        if mapping is None:
+            continue
+        if not isinstance(mapping, dict):
+            msg = '`task_metadata` must be a mapping of authored placement names.'
+            raise ValueError(msg)
+        for placement, metadata in mapping.items():
+            if not isinstance(metadata, dict):
+                msg = f'`task_metadata.{placement}` must be a mapping.'
+                raise ValueError(msg)
             merged[placement] = _recursive_merge(merged.get(placement, {}), copy.deepcopy(metadata))
     return merged
 
@@ -1018,12 +1030,6 @@ def _relax_launch_inputs(
     if init['kpoints_force_parity'] != main['kpoints_force_parity']:
         msg = 'base sections resolve different `kpoints_force_parity` but the native relax graph shares one input.'
         raise ValueError(msg)
-    if init['metadata_options'] != main['metadata_options']:
-        msg = (
-            'base sections resolve different scheduler options but the native relax graph carries one '
-            '`pw_calc` leaf key; pass shared `options` instead.'
-        )
-        raise ValueError(msg)
 
     settings = _apply_relax_type(
         parameters=main['parameters'],
@@ -1068,12 +1074,10 @@ def _relax_launch_inputs(
         launch['init_monitors'] = eff_init
     launch['task_metadata'] = _merge_task_metadata(
         {
-            'pw_calc': _placement_metadata(main['metadata_options'], options, protocol_code),
-            'pw_base_graph__*': _placement_metadata(main['metadata_options'], options, protocol_code),
-            'init_relax_guarded__*': _placement_metadata(main['metadata_options'], options, protocol_code),
-            'init_relax_guarded__pw_base_graph__*': _placement_metadata(
-                main['metadata_options'], options, protocol_code
-            ),
+            'init_relax_guarded': {
+                'initial': {'pw_calc': _placement_metadata(init['metadata_options'], options, protocol_code)}
+            },
+            'main': {'pw_calc': _placement_metadata(main['metadata_options'], options, protocol_code)},
         },
         task_metadata,
     )
@@ -1182,11 +1186,8 @@ def _bands_launch_inputs(
     bands_metadata = _placement_metadata(bands['metadata_options'], options, bands_code)
     launch['task_metadata'] = _merge_task_metadata(
         {
-            'pw_calc': scf_metadata,
-            'pw_base_graph__pw_calc': scf_metadata,
-            'pw_base_graph_2__pw_calc': bands_metadata,
-            'pw_base_graph__*': scf_metadata,
-            'pw_base_graph_2__*': bands_metadata,
+            'scf': {'pw_calc': scf_metadata},
+            'bands': {'pw_calc': bands_metadata},
         },
         task_metadata,
     )
@@ -1348,53 +1349,53 @@ def _pdos_launch_inputs(
                 launch['scf_monitors'] = eff_scf
             if eff_nscf is not None:
                 launch['nscf_monitors'] = eff_nscf
-    if from_parent:
-        scf_scope_rule = None
-    else:
-        scf_scope_rule = _placement_metadata(sections['scf']['metadata_options'], options, pw_code)
-    nscf_scope_rule = _placement_metadata(nscf['metadata_options'], options, pw_code)
-    hierarchical = {
-        f'{stage}__pw_base_graph__pw_calc': nscf_metadata,
-        f'{stage}__pw_base_graph__*': nscf_scope_rule,
-        f'{stage}__dos_calc': dos_metadata,
-        f'{stage}__projwfc_calc': projwfc_metadata,
+    stage_metadata: dict = {
+        'nscf': {'pw_calc': nscf_metadata},
+        'dos_calc': dos_metadata,
+        'projwfc_calc': projwfc_metadata,
     }
-    if not from_parent and scf_scope_rule is not None:
-        hierarchical['pw_base_graph__pw_calc'] = scf_options
-        hierarchical['pw_base_graph__*'] = scf_scope_rule
-    leaf_pw = scf_options if scf_options is not None else nscf_metadata
-    launch['task_metadata'] = _merge_task_metadata(
-        {'pw_calc': leaf_pw, 'dos_calc': dos_metadata, 'projwfc_calc': projwfc_metadata, **hierarchical},
-        task_metadata,
-    )
+    hierarchical = {stage: stage_metadata}
+    if not from_parent:
+        hierarchical['scf'] = {'pw_calc': scf_options}
+    launch['task_metadata'] = _merge_task_metadata(hierarchical, task_metadata)
     return launch
 
 
 def task_metadata_for_options(**placements: dict | None) -> dict[str, dict]:
     """Form a ``task_metadata`` launch mapping from per-placement scheduler mappings.
 
-    Each keyword names a graph placement (for example ``pw_calc``, ``dos_calc``,
-    ``projwfc_calc``) and each value is the metadata mapping for that placement
-    (for example ``{'options': {...}}``). Placements with ``None`` or empty
-    mappings are left out so the launch only carries what was requested.
+    Each keyword names one scope of the structured ``task_metadata`` mapping: an
+    authored subgraph callee alias (for example ``scf``) whose value is the nested
+    metadata subtree below that scope, or — when launching a base graph directly
+    — the ``CalcJob`` placement alias itself (for example ``pw_calc``) whose
+    value is the plain metadata mapping (for example ``{'options': {...}}``).
+    Entries with ``None`` are omitted; empty mappings are retained because they
+    are valid metadata leaves and must not become missing configuration::
 
-    :param placements: per-placement metadata mappings keyed by placement name.
+        task_metadata_for_options(scf={'pw_calc': {'options': scf_options}},
+                                  bands={'pw_calc': {'options': bands_options}})
+
+    :param placements: per-scope metadata subtrees keyed by scope name.
     :return: the ``task_metadata`` mapping to pass at launch.
     """
-    return {name: dict(metadata) for name, metadata in placements.items() if metadata}
+    return {name: dict(metadata) for name, metadata in placements.items() if metadata is not None}
 
 
 def pdos_protocol_task_metadata(protocol_inputs: dict) -> dict[str, dict]:
     """Extract the ``dos``/``projwfc`` scheduler options of PDOS protocol inputs.
 
     The PDOS YAML carries ``dos.metadata.options`` and
-    ``projwfc.metadata.options``; this helper lifts them into a
-    ``task_metadata`` mapping keyed by the graph placement names. ``pw`` XC
-    options are intentionally left out: the native base graph takes scheduler
-    options under its own ``'pw_calc'`` key at launch.
+    ``projwfc.metadata.options``; this helper lifts them into the nested
+    ``dos_calc``/``projwfc_calc`` leaf fragment of the stage scope. ``pw``
+    scheduler options are intentionally left out: the nested SCF/NSCF scopes
+    take theirs under their own ``'pw_calc'`` leaves at launch. Nest the
+    fragment under the stage scope to form a launch mapping::
+
+        {stage: {'nscf': {'pw_calc': {'options': nscf_options}},
+                 **pdos_protocol_task_metadata(inputs)}}
 
     :param protocol_inputs: the merged mapping from :func:`get_protocol_inputs`.
-    :return: the ``task_metadata`` mapping for the ``dos_calc``/``projwfc_calc`` placements.
+    :return: the ``dos_calc``/``projwfc_calc`` leaf fragment of a PDOS stage scope.
     """
     task_metadata: dict[str, dict] = {}
     for placement, section in (('dos_calc', 'dos'), ('projwfc_calc', 'projwfc')):

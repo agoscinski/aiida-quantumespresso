@@ -26,42 +26,60 @@ and validate without launching anything with ``assert pw_relax_graph.build() is 
 Scheduler options
 -----------------
 
-``CalcJob`` scheduler options travel at launch under ``task_metadata``, keyed by
-the ``pw.x`` placement name inside ``pw_base_graph`` (``'pw_calc'``), not through
-graph inputs. The experimental ``options`` ports of the previous revision were
-removed rather than silently ignored: passing scheduler options through a graph
-``Dict`` input would suggest per-iteration control that the native base graph
-does not offer (its options are constant across iterations). Form the launch
-mapping with :func:`task_metadata_for_options
-<aiida_quantumespresso.workflows.graphs.protocols.task_metadata_for_options>`::
+``CalcJob`` scheduler options travel at launch under ``task_metadata`` as a
+strictly nested mapping, not through graph inputs. Each authored subgraph
+callee alias adds one level; the ``CalcJob`` placement alias holds the normal
+metadata mapping at the leaf. Branch and loop control frames are transparent:
+iterations reuse their placement's configuration and add no key level. The
+relax scopes are the initial wrapper plus its inner alias and the main-loop
+alias; the bands scopes are ``scf`` and ``bands``::
 
-    from aiida_quantumespresso.workflows.graphs.protocols import task_metadata_for_options
+    task_metadata = {
+        'init_relax_guarded': {'initial': {'pw_calc': {'options': init_options}}},
+        'main': {'pw_calc': {'options': main_options}},
+    }
+    task_metadata = {
+        'scf': {'pw_calc': {'options': scf_options}},
+        'bands': {'pw_calc': {'options': bands_options}},
+    }
 
-    task_metadata = task_metadata_for_options(pw_calc={'options': {'max_wallclock_seconds': 3600}})
-    run_get_node(pw_relax_graph, ..., task_metadata=task_metadata)
+The experimental ``options`` ports of the previous revision were removed rather
+than silently ignored: passing scheduler options through a graph ``Dict``
+input would suggest per-iteration control that the native base graph does not
+offer (its options are constant across iterations). Form the launch mapping
+with :func:`task_metadata_for_options
+<aiida_quantumespresso.workflows.graphs.protocols.task_metadata_for_options>`
+or as a literal nested mapping; unknown paths, missing entries, and
+non-mapping leaves fail loudly at launch.
 
 Honest limits of this rewrite (see ``reports/refinement-composites.md``):
 
-* ``pw_base_graph`` is owned by the sibling ``graphs/base.py`` track; its agreed
+* ``pw_base_graph`` supplies the reusable restart loop; its
   contract is ``(code, structure, pseudos: DataDict, parameters, settings?,
   kpoints?, kpoints_distance?, kpoints_force_parity?, parent_folder?)`` returning
   ``output_parameters``/``output_structure?``/``output_band?``/``remote_folder``/
   ``report``. Pseudopotentials travel as a ``DataDict`` (kind name to ``UpfData``).
+  Each composite below calls it only through the module-level aliases
+  (``scf``/``bands``/``initial``/``main``), each containing the base's single
+  ``pw_calc`` placement.
 * A base run that exits ``501`` (ionic convergence reached except in final SCF)
   fails the step instead of triggering another iteration from the ``501``
-  structure: mapped error arms null out success outputs, so the relaxed structure
-  of a ``501`` run is unreachable downstream. Only success-path re-convergence
-  (k-point mesh regrowth, bounded iterations) is orchestrated here.
+  structure. Status 501 is not yet included in the native base's recovery policy;
+  this is QE implementation work, not a missing graph output-access capability.
 * Graphs declare no exit codes: legacy statuses (relax ``400/401/402/403``,
   bands ``201/202/402/403``) collapse into the single graph ``400
   ERROR_TASK_FAILED``. Outcomes are reported through the ``report`` output.
 * Input validators moved into ``@task`` bodies and now surface as task failures,
   not launch-time ``ValidationError``s. There is no ``clean_workdir`` handling,
   no ``dry_run``. ``monitors`` is an optional shared ``DataDict`` forwarded into
-  every nested ``pw_base_graph`` (initial, main-loop, SCF, bands); per-stage
-  overrides fall back to the shared mapping.
+  every nested base run through its authored alias (``initial`` for the initial
+  relaxation, ``main`` for the main loop, ``scf``/``bands`` for the bands
+  stages); per-stage overrides fall back to the shared mapping.
 * ``scf``-mode relax echoes the input structure as ``output_structure`` where the
   legacy chain emits none.
+* The ``initial``/``main`` aliases keep the two runs' configuration explicit.
+  Repeated calls in the same authored scope need distinct aliases; loop and
+  branch control frames do not add configuration levels.
 """
 
 import copy
@@ -78,6 +96,16 @@ from aiida_quantumespresso.calculations.functions.seekpath_structure_analysis im
     seekpath_structure_analysis as _seekpath_calcfunction,
 )
 from aiida_quantumespresso.workflows.graphs.base import pw_base_graph
+
+# Authored callee aliases: repeated calls to the same subgraph are told apart by
+# the name used at the call site, so each metadata-bearing placement gets its own
+# module-level alias. The structured ``task_metadata`` descends one level per
+# alias (``{'scf': {'pw_calc': ...}}``); loop iterations and branch arms share
+# their placement's configuration and add no level of their own.
+scf = pw_base_graph
+bands = pw_base_graph
+initial = pw_base_graph
+main = pw_base_graph
 
 # Undecorated twins of the ``calcfunction`` implementations above. Graph tasks run as calculation processes and so
 # cannot call a decorated ``calcfunction`` (the engine forbids it); calling the shared undecorated implementation
@@ -320,7 +348,7 @@ def init_relax_guarded(
     :param monitors: optional shared monitors forwarded into the base run.
     :return: the relaxed structure.
     """
-    initial = pw_base_graph(
+    base = initial(
         code=code,
         structure=structure,
         pseudos=pseudos,
@@ -331,7 +359,7 @@ def init_relax_guarded(
         parent_folder=parent_folder,
         monitors=monitors,
     )
-    return ensure_structure(candidate=initial.output_structure)
+    return ensure_structure(candidate=base.output_structure)
 
 
 @graph
@@ -395,7 +423,7 @@ def pw_relax_graph(
     attempts = 0
     rerun = True
     while rerun and attempts < max_iterations:
-        step = pw_base_graph(
+        step = main(
             code=code,
             structure=current,
             pseudos=pseudos,
@@ -480,7 +508,7 @@ def pw_bands_graph(
         scf_structure = path.primitive_structure
     else:
         scf_structure = structure
-    scf = pw_base_graph(
+    scf_run = scf(
         code=scf_code,
         structure=scf_structure,
         pseudos=pseudos,
@@ -491,22 +519,24 @@ def pw_bands_graph(
         monitors=scf_monitors if scf_monitors is not None else monitors,
     )
     resolved = resolve_bands_parameters(
-        scf_output_parameters=scf.output_parameters, bands_parameters=bands_parameters, nbands_factor=nbands_factor
+        scf_output_parameters=scf_run.output_parameters,
+        bands_parameters=bands_parameters,
+        nbands_factor=nbands_factor,
     )
-    bands = pw_base_graph(
+    bands_run = bands(
         code=bands_code,
         structure=scf_structure,
         pseudos=pseudos,
         parameters=resolved,
         settings=bands_settings,
         kpoints=path.explicit_kpoints,
-        parent_folder=scf.remote_folder,
+        parent_folder=scf_run.remote_folder,
         monitors=bands_monitors if bands_monitors is not None else monitors,
     )
     return {
-        'band_structure': bands.output_band,
-        'scf_parameters': scf.output_parameters,
-        'band_parameters': bands.output_parameters,
+        'band_structure': bands_run.output_band,
+        'scf_parameters': scf_run.output_parameters,
+        'band_parameters': bands_run.output_parameters,
         'primitive_structure': path.primitive_structure,
         'seekpath_parameters': path.seekpath_parameters,
     }
