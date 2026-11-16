@@ -1,13 +1,16 @@
 {
-  "tested_revision": "cb94cf3565ff3379534819e2da06e270e62552a4",
-  "core_revision": "d2045e4ff2932725796e04801df4727ba72d5db3",
-  "source": "Public GitHub Actions REST API job/step conclusions, not downloaded logs",
+  "tested_revision": "9d94b364a7759e8c783f193c1199225fe936cb51",
+  "core_revision": "3e5947cc73ea3f6bb442b04b8d9dbbf3066ab9d2",
+  "source": "Public GitHub Actions REST API job/step conclusions; no failure-log transcript",
   "local": {
     "qe_graphs": {
-      "passed": 100
+      "passed": 181
     },
     "core_graphs_presto": {
-      "passed": 996
+      "passed": 1006
+    },
+    "legacy_monitors_pw_calculations": {
+      "passed": 51
     },
     "legacy_workflows_new_core": {
       "failed": 89,
@@ -18,357 +21,55 @@
   "runs": [
     {
       "repository": "agoscinski/aiida-quantumespresso",
-      "id": 43910652437,
+      "id": 43934980171,
       "jobs": [
         {
           "name": "pre-commit",
           "status": "completed",
           "conclusion": "success",
-          "url": "https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43910652437/job/133451327302",
-          "steps": [
-            {
-              "name": "Set up job",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Run actions/checkout@v4",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Set up Python",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Install Hatch",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Run pre-commit",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Post Set up Python",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Post Run actions/checkout@v4",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Complete job",
-              "status": "completed",
-              "conclusion": "success"
-            }
-          ]
-        },
-        {
-          "name": "tests (3.13)",
-          "status": "completed",
-          "conclusion": "success",
-          "url": "https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43910652437/job/133451327608",
-          "steps": [
-            {
-              "name": "Set up job",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Initialize containers",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Run actions/checkout@v4",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Set up Python 3.13",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Install Hatch",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Run pytest",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Post Set up Python 3.13",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Post Run actions/checkout@v4",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Stop containers",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Complete job",
-              "status": "completed",
-              "conclusion": "success"
-            }
-          ]
-        },
-        {
-          "name": "tests (3.12)",
-          "status": "completed",
-          "conclusion": "success",
-          "url": "https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43910652437/job/133451327665",
-          "steps": [
-            {
-              "name": "Set up job",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Initialize containers",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Run actions/checkout@v4",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Set up Python 3.12",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Install Hatch",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Run pytest",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Post Set up Python 3.12",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Post Run actions/checkout@v4",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Stop containers",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Complete job",
-              "status": "completed",
-              "conclusion": "success"
-            }
-          ]
-        },
-        {
-          "name": "tests (3.10)",
-          "status": "completed",
-          "conclusion": "success",
-          "url": "https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43910652437/job/133451327696",
-          "steps": [
-            {
-              "name": "Set up job",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Initialize containers",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Run actions/checkout@v4",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Set up Python 3.10",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Install Hatch",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Run pytest",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Post Set up Python 3.10",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Post Run actions/checkout@v4",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Stop containers",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Complete job",
-              "status": "completed",
-              "conclusion": "success"
-            }
-          ]
+          "url": "https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43934980171/job/133537093634"
         },
         {
           "name": "tests (3.14)",
           "status": "completed",
           "conclusion": "success",
-          "url": "https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43910652437/job/133451327725",
-          "steps": [
-            {
-              "name": "Set up job",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Initialize containers",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Run actions/checkout@v4",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Set up Python 3.14",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Install Hatch",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Run pytest",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Post Set up Python 3.14",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Post Run actions/checkout@v4",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Stop containers",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Complete job",
-              "status": "completed",
-              "conclusion": "success"
-            }
-          ]
+          "url": "https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43934980171/job/133537093949"
+        },
+        {
+          "name": "tests (3.10)",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43934980171/job/133537093966"
+        },
+        {
+          "name": "tests (3.12)",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43934980171/job/133537094025"
         },
         {
           "name": "tests (3.11)",
           "status": "completed",
           "conclusion": "success",
-          "url": "https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43910652437/job/133451328074",
-          "steps": [
-            {
-              "name": "Set up job",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Initialize containers",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Run actions/checkout@v4",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Set up Python 3.11",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Install Hatch",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Run pytest",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Post Set up Python 3.11",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Post Run actions/checkout@v4",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Stop containers",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Complete job",
-              "status": "completed",
-              "conclusion": "success"
-            }
-          ]
+          "url": "https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43934980171/job/133537094042"
+        },
+        {
+          "name": "tests (3.13)",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43934980171/job/133537095188"
         }
       ]
     },
     {
       "repository": "agoscinski/aiida-quantumespresso",
-      "id": 43910652423,
+      "id": 43934980166,
       "jobs": [
         {
           "name": "graphs",
           "status": "completed",
           "conclusion": "failure",
-          "url": "https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43910652423/job/133451327996",
+          "url": "https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43934980166/job/133537094154",
           "steps": [
             {
               "name": "Set up job",
@@ -441,484 +142,72 @@
     },
     {
       "repository": "agoscinski/aiida-core",
-      "id": 43909202286,
-      "note": "Broader suite still in progress at observation; not a passing result",
+      "id": 43933247792,
+      "note": "One minimum-requirements job failed; one matrix job still running at observation; no full-core green claim",
       "jobs": [
         {
-          "name": "tests-presto",
-          "status": "in_progress",
-          "conclusion": null,
-          "url": "https://github.com/agoscinski/aiida-core/actions/runs/43909202286/job/133446159783",
-          "steps": [
-            {
-              "name": "Set up job",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Run actions/checkout@v7",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Install graphviz",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Install aiida-core",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Setup SSH on localhost",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Run test suite",
-              "status": "in_progress",
-              "conclusion": null
-            },
-            {
-              "name": "Post Install aiida-core",
-              "status": "pending",
-              "conclusion": null
-            },
-            {
-              "name": "Post Run actions/checkout@v7",
-              "status": "pending",
-              "conclusion": null
-            }
-          ]
+          "name": "test-pytest-fixtures",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/agoscinski/aiida-core/actions/runs/43933247792/job/133530974659"
         },
         {
           "name": "verdi",
           "status": "completed",
           "conclusion": "success",
-          "url": "https://github.com/agoscinski/aiida-core/actions/runs/43909202286/job/133446160130",
-          "steps": [
-            {
-              "name": "Set up job",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Run actions/checkout@v7",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Install aiida-core",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Run verdi tests",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Post Install aiida-core",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Post Run actions/checkout@v7",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Complete job",
-              "status": "completed",
-              "conclusion": "success"
-            }
-          ]
+          "url": "https://github.com/agoscinski/aiida-core/actions/runs/43933247792/job/133530974788"
+        },
+        {
+          "name": "tests-presto",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/agoscinski/aiida-core/actions/runs/43933247792/job/133530974860"
+        },
+        {
+          "name": "tests (3.10, psql, zmq)",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/agoscinski/aiida-core/actions/runs/43933247792/job/133530974913"
         },
         {
           "name": "tests (3.14, psql, zmq)",
-          "status": "in_progress",
-          "conclusion": null,
-          "url": "https://github.com/agoscinski/aiida-core/actions/runs/43909202286/job/133446160196",
-          "steps": [
-            {
-              "name": "Set up job",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Initialize containers",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Run actions/checkout@v7",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Install system dependencies",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Install aiida-core",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Setup environment",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Run test suite",
-              "status": "in_progress",
-              "conclusion": null
-            },
-            {
-              "name": "Upload coverage report",
-              "status": "pending",
-              "conclusion": null
-            },
-            {
-              "name": "Upload coverage artifact",
-              "status": "pending",
-              "conclusion": null
-            },
-            {
-              "name": "Post Install aiida-core",
-              "status": "pending",
-              "conclusion": null
-            },
-            {
-              "name": "Post Run actions/checkout@v7",
-              "status": "pending",
-              "conclusion": null
-            },
-            {
-              "name": "Stop containers",
-              "status": "pending",
-              "conclusion": null
-            }
-          ]
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/agoscinski/aiida-core/actions/runs/43933247792/job/133530974957"
+        },
+        {
+          "name": "test minimum reqs (3.10, sqlite)",
+          "status": "completed",
+          "conclusion": "failure",
+          "url": "https://github.com/agoscinski/aiida-core/actions/runs/43933247792/job/133530975128"
         },
         {
           "name": "tests (3.14, psql, rmq)",
-          "status": "in_progress",
-          "conclusion": null,
-          "url": "https://github.com/agoscinski/aiida-core/actions/runs/43909202286/job/133446160212",
-          "steps": [
-            {
-              "name": "Set up job",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Initialize containers",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Run actions/checkout@v7",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Install system dependencies",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Install aiida-core",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Setup environment",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Run test suite",
-              "status": "in_progress",
-              "conclusion": null
-            },
-            {
-              "name": "Upload coverage report",
-              "status": "pending",
-              "conclusion": null
-            },
-            {
-              "name": "Upload coverage artifact",
-              "status": "pending",
-              "conclusion": null
-            },
-            {
-              "name": "Post Install aiida-core",
-              "status": "pending",
-              "conclusion": null
-            },
-            {
-              "name": "Post Run actions/checkout@v7",
-              "status": "pending",
-              "conclusion": null
-            },
-            {
-              "name": "Stop containers",
-              "status": "pending",
-              "conclusion": null
-            }
-          ]
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/agoscinski/aiida-core/actions/runs/43933247792/job/133530975168"
         },
         {
           "name": "tests (3.10, psql, rmq)",
           "status": "in_progress",
           "conclusion": null,
-          "url": "https://github.com/agoscinski/aiida-core/actions/runs/43909202286/job/133446160258",
-          "steps": [
-            {
-              "name": "Set up job",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Initialize containers",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Run actions/checkout@v7",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Install system dependencies",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Install aiida-core",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Setup environment",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Run test suite",
-              "status": "in_progress",
-              "conclusion": null
-            },
-            {
-              "name": "Upload coverage report",
-              "status": "pending",
-              "conclusion": null
-            },
-            {
-              "name": "Upload coverage artifact",
-              "status": "pending",
-              "conclusion": null
-            },
-            {
-              "name": "Post Install aiida-core",
-              "status": "pending",
-              "conclusion": null
-            },
-            {
-              "name": "Post Run actions/checkout@v7",
-              "status": "pending",
-              "conclusion": null
-            },
-            {
-              "name": "Stop containers",
-              "status": "pending",
-              "conclusion": null
-            }
-          ]
-        },
-        {
-          "name": "test-pytest-fixtures",
-          "status": "completed",
-          "conclusion": "success",
-          "url": "https://github.com/agoscinski/aiida-core/actions/runs/43909202286/job/133446160267",
-          "steps": [
-            {
-              "name": "Set up job",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Initialize containers",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Run actions/checkout@v7",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Install aiida-core",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Setup SSH",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Test new pytest fixtures",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Upload coverage report",
-              "status": "completed",
-              "conclusion": "skipped"
-            },
-            {
-              "name": "Post Install aiida-core",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Post Run actions/checkout@v7",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Stop containers",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Complete job",
-              "status": "completed",
-              "conclusion": "success"
-            }
-          ]
-        },
-        {
-          "name": "test minimum reqs (3.10, sqlite)",
-          "status": "in_progress",
-          "conclusion": null,
-          "url": "https://github.com/agoscinski/aiida-core/actions/runs/43909202286/job/133446160283",
-          "steps": [
-            {
-              "name": "Set up job",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Run actions/checkout@v7",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Install graphviz",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Install aiida-core",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Setup SSH on localhost",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Run test suite",
-              "status": "in_progress",
-              "conclusion": null
-            },
-            {
-              "name": "Post Install aiida-core",
-              "status": "pending",
-              "conclusion": null
-            },
-            {
-              "name": "Post Run actions/checkout@v7",
-              "status": "pending",
-              "conclusion": null
-            }
-          ]
-        },
-        {
-          "name": "tests (3.10, psql, zmq)",
-          "status": "in_progress",
-          "conclusion": null,
-          "url": "https://github.com/agoscinski/aiida-core/actions/runs/43909202286/job/133446160687",
-          "steps": [
-            {
-              "name": "Set up job",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Initialize containers",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Run actions/checkout@v7",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Install system dependencies",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Install aiida-core",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Setup environment",
-              "status": "completed",
-              "conclusion": "success"
-            },
-            {
-              "name": "Run test suite",
-              "status": "in_progress",
-              "conclusion": null
-            },
-            {
-              "name": "Upload coverage report",
-              "status": "pending",
-              "conclusion": null
-            },
-            {
-              "name": "Upload coverage artifact",
-              "status": "pending",
-              "conclusion": null
-            },
-            {
-              "name": "Post Install aiida-core",
-              "status": "pending",
-              "conclusion": null
-            },
-            {
-              "name": "Post Run actions/checkout@v7",
-              "status": "pending",
-              "conclusion": null
-            },
-            {
-              "name": "Stop containers",
-              "status": "pending",
-              "conclusion": null
-            }
-          ]
+          "url": "https://github.com/agoscinski/aiida-core/actions/runs/43933247792/job/133530975264"
         }
       ]
+    },
+    {
+      "repository": "agoscinski/aiida-core",
+      "id": 43933248450,
+      "name": "pre-commit",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "repository": "agoscinski/aiida-core",
+      "id": 43933248183,
+      "name": "docs-build",
+      "status": "completed",
+      "conclusion": "success"
     }
   ]
 }

@@ -181,6 +181,22 @@ prerequisites. No new broad core authoring wishlist follows from remaining QE wo
 
 ## Remote verification
 
-The core source is pushed and QE CI is updated to the exact new pin. New QE source
-push and CI observation are pending; previous `ci-verification.json` results belong
-to the earlier revision until this section and that evidence file are updated.
+QE source **`9d94b364a7759e8c783f193c1199225fe936cb51`** is pushed to
+`origin/rewrite`; core is pushed to `origin/refactor/graph-qe-round3`. The final
+report-only commit records the results below without changing executable source.
+`ci-verification.json` contains the observed public API job/step conclusions.
+
+| Run | Observed result |
+| --- | --- |
+| [QE stable-core CI 43934980171](https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43934980171) | **Passed:** pre-commit and Python 3.10, 3.11, 3.12, 3.13, 3.14 tests. Graph modules skip on released core, so this is stable compatibility coverage. |
+| [QE native graph CI 43934980166](https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43934980166) | Exact core revision/API gate **passed**, expanded graph-test step **passed**; legacy workflow regression step **failed**. Overall run is **red**, not a complete migration gate. |
+| [Core pre-commit 43933248450](https://github.com/agoscinski/aiida-core/actions/runs/43933248450) | **Passed.** |
+| [Core docs build 43933248183](https://github.com/agoscinski/aiida-core/actions/runs/43933248183) | **Passed.** |
+| [Broader core CI 43933247792](https://github.com/agoscinski/aiida-core/actions/runs/43933247792) | Presto, CLI, fixtures, Python 3.10/3.14 PostgreSQL+ZeroMQ, and Python 3.14 PostgreSQL+RabbitMQ jobs **passed**. Minimum-requirements Python 3.10/SQLite job **failed**; Python 3.10/PostgreSQL+RabbitMQ was still running at observation. No all-core-CI success is claimed. |
+
+Verification uses public API status/step results, not downloaded failure logs.
+The minimum-requirements failure has not been diagnosed here; it is neither hidden
+nor attributed to unrelated code without evidence. The local 89-failure legacy
+breakdown is a local reproduction, not a remote log transcript. Native tests and
+stable compatibility pass, but remaining behavior and compatibility gaps prevent
+a feature-complete verdict.
