@@ -110,13 +110,38 @@ No real QE executable, remote scheduler, daemon restart, or full PH/NEB runtime 
 validated. PW/PDOS composite runtime tests still use mirrored stub graphs; their
 production bodies have build checks, not full production-placement runtime coverage.
 
-Legacy workflows against experimental core, stopping at first failure:
-**37 passed, 1 failed**: `tests/workflows/protocols/ph/test_base.py::test_default`
-uses `orm.AbstractCode`, removed in core 3. This compatibility problem is not a graph
-compiler defect, and must be migrated before a feature-complete core-3 release.
-The dedicated CI intentionally includes this regression gate rather than hiding it.
+Legacy workflows against experimental core: full suite **89 failed, 106 passed,
+1 skipped** (28.44 seconds). The first failure,
+`tests/workflows/protocols/ph/test_base.py::test_default`, uses `orm.AbstractCode`,
+removed in core 3; protocol tests account for the failures. This compatibility
+problem is not a graph compiler defect, and must be migrated before a
+feature-complete core-3 release. The dedicated CI intentionally includes this
+regression gate rather than hiding it.
+
+Both repository pre-commit hooks (Ruff lint and format) passed before pushing.
 
 ## Remote verification
 
-Pending push and GitHub Actions results. This section will be updated with the
-pushed implementation commit, run URLs, conclusions, and any infrastructure limits.
+Pushed to `origin/rewrite` (`git@github.com:agoscinski/aiida-quantumespresso.git`).
+Implementation commit: `29622079b1b576522ec96682e2d4f9e3779595a0`.
+**CI-tested revision: `3b6cdbc8b78d051c5091993fa17ea5bad73dbbd9`**, which fixes
+YAML quoting in the new workflow. The subsequent report/docstring-only commit
+records these results; it does not change executable workflow behavior.
+
+| Run | Observed result |
+| --- | --- |
+| [Stable-core CI 43892033180](https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43892033180) | **Passed:** pre-commit and tests on Python 3.10, 3.11, 3.12, 3.13, 3.14. Graph modules explicitly skip on core 2.8, so this is compatibility coverage, not graph coverage. |
+| [Experimental-core graph CI 43892033060](https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43892033060) | **Failed overall:** pinned-core installation/revision check and graph tests **passed**; legacy workflow regression step **failed**. This is not a green migration gate. |
+
+The first graph workflow run (43891942001) failed workflow validation because a
+shell option containing `: ` was not a YAML block scalar. Corrected and re-pushed;
+the runs above are the valid rerun, not that initial invalid run.
+
+Verification used public GitHub Actions API job/step conclusions. The configured
+`gh` token is invalid and log download returned HTTP 403, so remote failure details
+could not be inspected. The 89-failure breakdown above is the **local** full-suite
+reproduction against the same core revision, not a claimed remote log transcript.
+
+**Release conclusion:** stable compatibility is green, graph tests are green, but
+experimental-core regression compatibility is red and scientific/restart parity
+is incomplete. Keep the legacy entry points; do not label this feature-complete.

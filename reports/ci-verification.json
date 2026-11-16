@@ -1,0 +1,126 @@
+{
+  "tested_revision": "3b6cdbc8b78d051c5091993fa17ea5bad73dbbd9",
+  "core_revision": "3db2173f3c4761a4968595b2fdfeb7f3c63d8d32",
+  "source": "Public GitHub Actions REST API; logs unavailable (HTTP 403)",
+  "runs": [
+    {
+      "id": 43892033180,
+      "jobs": [
+        {
+          "name": "pre-commit",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43892033180/job/133385526957"
+        },
+        {
+          "name": "tests (3.10)",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43892033180/job/133385526963"
+        },
+        {
+          "name": "tests (3.12)",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43892033180/job/133385527218"
+        },
+        {
+          "name": "tests (3.14)",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43892033180/job/133385527293"
+        },
+        {
+          "name": "tests (3.13)",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43892033180/job/133385527464"
+        },
+        {
+          "name": "tests (3.11)",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43892033180/job/133385527584"
+        }
+      ]
+    },
+    {
+      "id": 43892033060,
+      "jobs": [
+        {
+          "name": "graphs",
+          "status": "completed",
+          "conclusion": "failure",
+          "url": "https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43892033060/job/133385526375",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Initialize containers",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run astral-sh/setup-uv@v6",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Install QE and test dependencies",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Install pinned experimental core",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Verify core revision and graph API",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Graph tests (must not skip)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Legacy workflow regression suite against experimental core",
+              "status": "completed",
+              "conclusion": "failure"
+            },
+            {
+              "name": "Post Run astral-sh/setup-uv@v6",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Stop containers",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -8,10 +8,9 @@
 ############################################################################
 """Mocked tests for the native ``@graph`` PDOS orchestration.
 
-Run from the parent core checkout (the legacy ``ProtocolMixin`` still imports ``plumpy``, which the core
-environment only provides as a transient overlay)::
+Run from the parent core checkout with the QE dependencies installed::
 
-    uv run --with plumpy pytest aiida-quantumespresso/tests/graphs/test_pdos.py -q
+    uv run pytest aiida-quantumespresso/tests/graphs/test_pdos.py -q
 
 The real graphs (:mod:`aiida_quantumespresso.workflows.graphs.pdos`) are validated with ``build()`` and their
 ``@task`` collaborators run for real through ``run_get_node`` (all local: no codes, no cluster). Full
