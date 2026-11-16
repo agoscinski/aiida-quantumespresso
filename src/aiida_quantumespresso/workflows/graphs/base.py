@@ -54,8 +54,8 @@ Per-workflow coverage
   ``qpoints_distance`` takes an explicit ``structure`` input instead of deriving it
   from the parent folder provenance.
 * ``neb_base_graph`` places ``NebCalculation`` directly with ``errors=NebErrors``
-  (``pw.pseudos`` closed with ``orm.DataDict``, expanded into the nested dynamic
-  namespace at launch). Ported: diagonalization cycling on the nested ``pw``
+  (``pw.pseudos`` is a static ``DataDict`` container on the ``pw`` namespace).
+  Ported: diagonalization cycling on the nested ``pw``
   parameters, interrupted-trajectory full restart, ``nstep_path`` extension from the
   initial inputs, and electronic ``mixing_beta`` reduction. ``kpoints_distance``
   builds k-points from the last image structure.
@@ -79,16 +79,16 @@ run genuinely never stored (for example a job killed before writing any output),
 instead of retrying degraded. The ``is not None`` rebinding checks stay as
 further defense in depth behind the guards.
 
-Dynamic pseudos
+Static pseudos
 ---------------
 
-The ``pseudos`` inputs are general ``DataDict`` mappings of kind names onto
-``UpfData`` nodes (one entry per structure kind). The ``task`` declarations close
-the dynamic ``pseudos`` namespace with ``orm.DataDict``, which the graph runtime
-expands into the process namespace at launch; the handler tasks themselves are
-kind-agnostic and reusable. ``Code`` inputs are required; scheduler options for
-``CalcJob`` placements are supplied at launch under ``task_metadata`` keyed by
-placement name.
+The ``pseudos`` inputs are static ``DataDict`` containers mapping kind names onto
+owned ``UpfData`` members (one entry per structure kind). CalcJobs consume the
+container directly; no pseudopotential namespace declaration or expansion is needed
+in the graph. Provenance links the single ``pseudos`` container, whose members keep
+their identity and repository content. Monitor inputs retain their existing dynamic
+namespace and graph forwarding behavior. ``Code`` inputs are required; scheduler
+options travel in ``task_metadata`` keyed by placement name.
 
 Native ``pw`` subgraph
 ----------------------
@@ -98,7 +98,7 @@ Native ``pw`` subgraph
 kpoints_force_parity?, parent_folder?, monitors?, max_iterations?)``. ``parameters`` accepts a
 plain ``dict`` or an ``orm.Dict``. ``monitors`` is an optional ``DataDict`` mapping
 monitor names onto monitor ``Dict`` nodes (entry point plus kwargs); dispatch expands
-it into the ``CalcJob`` ``monitors`` namespace at launch. Structured monitors attach
+it into the existing ``CalcJob`` monitor namespace. Structured monitors attach
 a ``monitor_diagnostics`` output that the monitor-stuck handler reads. It returns the calculation outputs
 (``output_parameters`` always; ``output_structure``, ``output_band``,
 ``output_trajectory``, ``output_kpoints``, ``output_atomic_occupations`` and
@@ -1158,9 +1158,9 @@ def rattle_positions(structure: orm.StructureData, stdev: float) -> orm.Structur
     return rattled
 
 
-pw_calc = task(PwCalculation, inputs={'pseudos': orm.DataDict, 'monitors': orm.DataDict}, errors=PwErrors)
+pw_calc = task(PwCalculation, inputs={'monitors': orm.DataDict}, errors=PwErrors)
 ph_calc = task(PhCalculation, errors=PhErrors)
-neb_calc = task(NebCalculation, inputs={'pw': {'pseudos': orm.DataDict}}, errors=NebErrors)
+neb_calc = task(NebCalculation, errors=NebErrors)
 q2r_calc = task(Q2rCalculation)
 matdyn_calc = task(MatdynCalculation)
 bands_calc = task(BandsCalculation)
@@ -1192,7 +1192,7 @@ def pw_base_graph(
     only when the failed run genuinely never stored the needed node.
     ``parameters`` accepts a plain ``dict`` or an ``orm.Dict``. Scheduler options
     travel in ``task_metadata`` keyed by placement name at launch. ``monitors`` is an
-    optional ``DataDict`` forwarded into the ``CalcJob`` ``monitors`` namespace;
+    optional ``DataDict`` forwarded into the existing ``CalcJob`` monitor namespace;
     omit it (or pass an empty mapping) and the placements run unmonitored.
     """
     if kpoints is None:

@@ -230,9 +230,7 @@ def _patch_nested(monkeypatch, pw_stub=None, dos_stub=None, projwfc_stub=None) -
     reset (restored afterwards by ``monkeypatch``) to force recompilation.
     """
     if pw_stub is not None:
-        from aiida.orm import DataDict as _DataDict
-
-        shaped = task(pw_stub, inputs={'pseudos': _DataDict, 'monitors': _DataDict}, errors=PwErrors)
+        shaped = task(pw_stub, inputs={'monitors': DataDict}, errors=PwErrors)
         monkeypatch.setattr(base_module, 'pw_calc', shaped)
     if dos_stub is not None:
         monkeypatch.setattr(pdos_module, 'dos_calc', task(dos_stub))
@@ -254,7 +252,12 @@ def _patch_nested(monkeypatch, pw_stub=None, dos_stub=None, projwfc_stub=None) -
 
 
 def _assert_native_provenance(node, pseudos: DataDict) -> None:
-    """Assert the run placed no work chains, created nothing at the root, and wired pseudos through."""
+    """Assert the run placed no work chains, created nothing at the root, and wired pseudos through.
+
+    Static ``pseudos`` arrive as one ``DataDict`` container link; owned members are
+    read through the stored container without detaching or re-expanding, keeping
+    their identity and repository content.
+    """
     assert isinstance(node, GraphNode)
     assert node.base.links.get_outgoing(link_type=LinkType.CREATE).all() == []
     descendants = node.called_descendants
@@ -269,10 +272,16 @@ def _assert_native_provenance(node, pseudos: DataDict) -> None:
     assert pw_calcs, 'the native base loop should place at least one pw CalcJob'
     for calc in pw_calcs:
         incoming = {link.link_label: link.node for link in calc.base.links.get_incoming().all()}
+        assert 'pseudos' in incoming, 'the static pseudos container must reach every pw CalcJob'
+        assert not any(label.startswith('pseudos__') for label in incoming)
+        container = incoming['pseudos']
+        assert container.is_stored
         for kind in pseudos:
-            label = f'pseudos__{kind}'
-            assert label in incoming, f'the general pseudos mapping must reach every pw CalcJob ({label})'
-            assert incoming[label].is_stored
+            assert kind in container, f'owned pseudo {kind} must be readable through the container'
+            member = container[kind]
+            assert member.is_stored
+            # Repository access without detaching: the owned Upf file is readable in place.
+            assert member.base.repository.list_object_names()
 
 
 def test_build_production_graphs() -> None:

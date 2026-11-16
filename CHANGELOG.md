@@ -12,6 +12,16 @@
   retries through scoped `task_metadata` rules (requires the pinned core).
 * Add externally owned post-termination cleanup and PH output merging helpers.
   These do not automatically run on cancellation or replace graph return outputs.
+* Native `CalcJob` pseudopotentials go static on `aiida-core` 3: `BasePwCpInputGenerator`
+  (so `PwCalculation`/`CpCalculation`) declares `pseudos` as one `DataDict` input
+  (`valid_type=orm.DataDict`, `serializer=orm.DataDict`) with per-member validation for legacy
+  `core.upf` / `pseudo.upf` nodes, instead of the dynamic `pseudos` namespace closure. Plain `dict`
+  launch inputs keep working through the serializer, which copies nodes into the container without
+  mutating the caller's mapping. `NebCalculation` inherits the static `pw.pseudos` through
+  `expose_inputs` with the `pw` namespace pinned static, so plain `task(...)` handles build from the
+  native spec with no `inputs=`. The `aiida-core` 2.x dynamic-namespace branch is retained
+  (`pyproject.toml` still pins `aiida_core~=2.8`). Staged `local_copy_list` entries now reference the
+  owned container copies (fresh UUIDs); generated input files are unchanged.
 
 ### Breaking changes (experimental graph API only)
 

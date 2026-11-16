@@ -166,7 +166,7 @@ class ConditionalPwCalc(_MonitorStubBase):
 
 def _substitute(monkeypatch, stub):
     """Replace the ``pw_calc`` placement with a stub task, recompiling the production graph."""
-    shaped = task(stub, inputs={'pseudos': orm.DataDict, 'monitors': orm.DataDict}, errors=PwErrors)
+    shaped = task(stub, inputs={'monitors': orm.DataDict}, errors=PwErrors)
     monkeypatch.setattr(base, 'pw_calc', shaped)
     monkeypatch.setattr(base.pw_base_graph, '_template', None)
     return shaped
