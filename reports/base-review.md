@@ -1,5 +1,9 @@
 # Base graphs production-correctness review
 
+> Historical worker handoff / earlier audit. For integrated validation and current
+> conclusions, see [graph-migration.md](graph-migration.md); interim failures and
+> test totals below are not the final combined result.
+
 - **Track:** native `@graph` alternatives to the six `*BaseWorkChain` restart loops
   (`aiida-quantumespresso`).
 - **Owned files (this review only):** `src/aiida_quantumespresso/workflows/graphs/base.py`,

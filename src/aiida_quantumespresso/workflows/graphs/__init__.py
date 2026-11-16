@@ -13,7 +13,14 @@ from aiida_quantumespresso.workflows.graphs.base import (
     pw_base_graph,
     q2r_base_graph,
 )
-from aiida_quantumespresso.workflows.graphs.pdos import pdos_from_parent, pdos_from_scratch
+from aiida_quantumespresso.workflows.graphs.pdos import (
+    pdos_from_parent,
+    pdos_from_parent_parallel,
+    pdos_from_parent_serial,
+    pdos_from_scratch,
+    pdos_from_scratch_parallel,
+    pdos_from_scratch_serial,
+)
 from aiida_quantumespresso.workflows.graphs.pw import pw_bands_graph, pw_relax_graph
 
 __all__ = (
@@ -21,7 +28,11 @@ __all__ = (
     'matdyn_base_graph',
     'neb_base_graph',
     'pdos_from_parent',
+    'pdos_from_parent_parallel',
+    'pdos_from_parent_serial',
     'pdos_from_scratch',
+    'pdos_from_scratch_parallel',
+    'pdos_from_scratch_serial',
     'ph_base_graph',
     'pw_bands_graph',
     'pw_base_graph',

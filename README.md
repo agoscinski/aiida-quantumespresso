@@ -17,9 +17,11 @@ Go through [the quick start tutorial](https://aiida-quantumespresso.readthedocs.
 ## Experimental graph workflows
 
 `aiida_quantumespresso.workflows.graphs` provides native graph alternatives for the
-nine workflow families. **The migration is not feature-complete or a drop-in
-replacement.** Legacy workflow entry points remain unchanged. Graphs require the
-exact experimental core revision pinned in `.github/workflows/graph.yml`.
+nine workflow families, without placing or importing legacy WorkChains. PW/NEB
+accept general pseudopotential mappings; PDOS offers explicit serial/parallel
+roots. **The migration is not feature-complete or a drop-in replacement.**
+Legacy workflow entry points remain unchanged. Graphs require the exact
+experimental core revision pinned in `.github/workflows/graph.yml`.
 See the [migration and verification report](reports/graph-migration.md) for coverage,
 test results, installation context, and graph-layer blockers.
 

@@ -15,7 +15,7 @@ Shape of each translation
 Science lives in ``@task`` collaborators (restart mathematics ported from the
 corresponding ``process_handler`` methods); the ``@graph`` only orchestrates. Counters
 and retry predicates stay inline, exactly like the canonical recipe in
-``tests/engine/processes/graphs/test_authoring_recipe.py``. A ``while`` loop retries a
+``docs/source/topics/workflows/graphs.rst``. A ``while`` loop retries a
 fallible ``CalcJob`` placement through its declared ``errors`` mapping, a finalizer
 task assembles the next-iteration inputs, an ``ensure_*`` task fails the graph loudly
 when the budget runs out, and a ``summarize_restart`` task records attempts and status
@@ -37,21 +37,21 @@ Per-workflow coverage
   ``STOPPED_BY_MONITOR`` (the original gates on the exit *message*, which the error
   arm does not carry), ``ERROR_IONIC_CONVERGENCE_REACHED_EXCEPT_IN_FINAL_SCF`` and
   ``WARNING_ELECTRONIC_CONVERGENCE_NOT_REACHED`` (the original finishes *with* an
-  exit code while attaching outputs; mapped-error children expose no success outputs,
-  so the graph fails loudly instead of silently succeeding), scheduler
-  ``max_seconds`` capping (scheduler options arrive via ``task_metadata`` and are
-  constant across iterations), and the disabled empty ``exit_codes=[]`` handler.
+  exit code while attaching outputs; the graph keeps the loud ``ensure_*`` failure
+  instead of silently succeeding with a non-zero status), scheduler
+  ``max_seconds`` capping (deriving this from fixed launch options remains
+  input-preparation work), and the disabled empty ``exit_codes=[]`` handler.
 * ``ph_base_graph`` places ``PhCalculation`` with ``errors=PhErrors``. Ported:
   scheduler-walltime ``max_seconds`` halving (only when already present, see above),
   diagonalization switch to ``cg``, out-of-walltime recover restart with the
   recover latch, and the ``nmix_ph``/``alpha_mix`` convergence chain. Not ported:
-  merging of multi-recover output parameters (the recover chain is found by walking
-  provenance and per-iteration outputs cannot be accumulated into one container with
-  the current container types); the graph returns the last iteration outputs.
+  merging of multi-recover output parameters: a provenance-preserving merge remains
+  QE implementation work; the graph currently returns the last iteration outputs.
   ``qpoints_distance`` takes an explicit ``structure`` input instead of deriving it
   from the parent folder provenance.
-* ``neb_base_graph`` places a static-port wrapper work chain (see below) with
-  ``errors=NebErrors``. Ported: diagonalization cycling on the nested ``pw``
+* ``neb_base_graph`` places ``NebCalculation`` directly with ``errors=NebErrors``
+  (``pw.pseudos`` closed with ``orm.DataDict``, expanded into the nested dynamic
+  namespace at launch). Ported: diagonalization cycling on the nested ``pw``
   parameters, interrupted-trajectory full restart, ``nstep_path`` extension from the
   initial inputs, and electronic ``mixing_beta`` reduction. ``kpoints_distance``
   builds k-points from the last image structure.
@@ -59,51 +59,52 @@ Per-workflow coverage
   calculation once and return its outputs. This is faithful: the originals define no
   process handlers, so a failure aborts without retry.
 
-Mapped failures hide the failed run's outputs
----------------------------------------------
+Failed outputs and the restart-node guards
+------------------------------------------
 
-A placement that finishes with a mapped error exposes only its ``error`` arm: success
-outputs read as ``None`` downstream even though the failed calculation stored them.
-The legacy handlers instead read ``calculation.outputs.remote_folder``,
-``output_structure``, and ``output_parameters`` directly, so any graph restart that
-needs those nodes cannot execute faithfully. The ``require_*_restart_nodes`` tasks
-fail such runs loudly (naming the missing node) instead of retrying degraded. In
-practice only parameter-only restarts (diagonalization cycling) and success-path
-restarts (whose outputs are visible) recover; walltime, ionic, and NEB remote
-restarts, and every ``ph`` recover restart, abort at the guard. The ``is not None``
-rebinding checks stay as defense in depth behind the guards.
+A placement that finishes with a mapped error exposes its ``error`` arm alongside
+the failed run's stored outputs: the runtime preserves them, so
+``run.remote_folder`` and ``run.output_structure`` read the failed calculation's
+nodes downstream, exactly like the legacy handlers reading
+``calculation.outputs`` directly. Restarts that need those nodes (walltime full
+restarts, ionic output-structure restarts, electronic full restarts, NEB remote
+restarts, every ``ph`` recover restart) therefore rebind and recover. The
+``require_*_restart_nodes`` tasks stay as defense in depth: they fail the graph
+loudly (naming the missing node) when a claimed restart needs a node the failed
+run genuinely never stored (for example a job killed before writing any output),
+instead of retrying degraded. The ``is not None`` rebinding checks stay as
+further defense in depth behind the guards.
 
-Static shapes
--------------
+Dynamic pseudos
+---------------
 
-Graph ports are static, so the dynamic ``pseudos`` namespace is closed with an
-explicit single-kind example shape (``{'Si': UpfData}``). Structures with other kind
-names need a copy of the graph with the corresponding entries added to the ``task``
-declaration; the handler tasks themselves are kind-agnostic and reusable. ``Code``
-inputs are required; scheduler options for ``CalcJob`` placements are supplied at
-launch under ``task_metadata`` keyed by placement name.
+The ``pseudos`` inputs are general ``DataDict`` mappings of kind names onto
+``UpfData`` nodes (one entry per structure kind). The ``task`` declarations close
+the dynamic ``pseudos`` namespace with ``orm.DataDict``, which the graph runtime
+expands into the process namespace at launch; the handler tasks themselves are
+kind-agnostic and reusable. ``Code`` inputs are required; scheduler options for
+``CalcJob`` placements are supplied at launch under ``task_metadata`` keyed by
+placement name.
 
-The ``neb`` wrapper
---------------------
+Native ``pw`` subgraph
+----------------------
 
-``NebCalculation`` nests its dynamic ``pseudos`` namespace inside the required
-dynamic ``pw`` namespace, and the graph layer cannot close a required nested dynamic
-namespace through ``task(..., inputs=...)`` (the closed parent keeps its dynamic
-flag and the placement is rejected). ``NebStaticWrapper`` therefore closes the
-shape at runtime instead: it takes one pseudo per the fixed example kind and fills
-``pw.pseudos`` when submitting the calculation. It runs a single calculation and
-propagates its exit status, so the graph retry loop observes the same declared
-failures as a direct placement; the extra work chain level per iteration is the
-known cost of this adapter.
+``pw_base_graph`` is the reusable restart loop for composite graphs:
+``(code, structure, pseudos, parameters, settings?, kpoints?, kpoints_distance?,
+kpoints_force_parity?, parent_folder?, max_iterations?)``. ``parameters`` accepts a
+plain ``dict`` or an ``orm.Dict``. It returns the calculation outputs
+(``output_parameters`` always; ``output_structure``, ``output_band``,
+``output_trajectory``, ``output_kpoints``, ``output_atomic_occupations`` and
+``remote_folder`` when the finished run stores them) plus a ``report`` recording
+attempts and status. Outputs are existing nodes regrouped, never fabricated data.
 """
 
 import typing as t
 
 from aiida import orm
-from aiida.common import AttributeDict
-from aiida.engine import ToContext, WorkChain, graph, task
+from aiida.engine import graph, task
 from aiida.engine.processes.exit_code import ExitCode, ExitCodeEnum
-from aiida.plugins import DataFactory
+
 from aiida_quantumespresso.calculations.bands import BandsCalculation
 from aiida_quantumespresso.calculations.matdyn import MatdynCalculation
 from aiida_quantumespresso.calculations.neb import NebCalculation
@@ -112,8 +113,6 @@ from aiida_quantumespresso.calculations.pw import PwCalculation
 from aiida_quantumespresso.calculations.q2r import Q2rCalculation
 from aiida_quantumespresso.data.force_constants import ForceConstantsData
 from aiida_quantumespresso.utils.bands import get_highest_occupied_band
-
-UpfData = DataFactory('pseudo.upf')
 
 # Fallback values mirror ``PwBaseWorkChain.defaults`` and ``qe_defaults``. They are
 # repeated here (instead of imported) because importing the work chain modules would
@@ -198,8 +197,8 @@ class PwCarry(t.TypedDict):
     tried: list
     restart: bool
     rattled: bool
+    keep_parent: bool
     use_remote_parent: bool
-    clear_parent: bool
 
 
 class PwRestartPlan(t.TypedDict):
@@ -219,8 +218,8 @@ class PhCarry(t.TypedDict):
     parameters: dict
     restart: bool
     recover: bool
+    keep_parent: bool
     use_remote_parent: bool
-    clear_parent: bool
 
 
 class PhRestartPlan(t.TypedDict):
@@ -239,8 +238,8 @@ class NebCarry(t.TypedDict):
     pw_parameters: dict
     tried: list
     restart: bool
+    keep_parent: bool
     use_remote_parent: bool
-    clear_parent: bool
 
 
 class NebRestartPlan(t.TypedDict):
@@ -569,24 +568,18 @@ def finalize_pw_carry(
 
     Returning input nodes from a task would attach ``CREATE`` links to ancestors,
     which the provenance cycle check rejects. The graph body therefore rebinds the
-    structure and parent folder with branches over these plain-data flags.
+    structure and the parent folder with branches over these plain-data flags. The
+    keep arm comes first so the carried ``parent`` wire stays nullable: a taken
+    ``None`` arm would declare the untaken arm ``None``-only and reject a rebound
+    folder at runtime.
     """
-    if parent_mode == 'remote':
-        use_remote_parent = True
-        clear_parent = False
-    elif parent_mode == 'none':
-        use_remote_parent = False
-        clear_parent = True
-    else:
-        use_remote_parent = False
-        clear_parent = False
     return {
         'parameters': parameters,
         'tried': tried,
         'restart': restart,
         'rattled': rattled_before or rattle_now,
-        'use_remote_parent': use_remote_parent,
-        'clear_parent': clear_parent,
+        'keep_parent': parent_mode == 'keep',
+        'use_remote_parent': parent_mode == 'remote',
     }
 
 
@@ -803,21 +796,12 @@ def finalize_ph_carry(
     later restart recovers from the latest remote folder. Node selection stays in the
     graph body (see :func:`finalize_pw_carry`).
     """
-    if parent_mode == 'remote':
-        use_remote_parent = True
-        clear_parent = False
-    elif parent_mode == 'none':
-        use_remote_parent = False
-        clear_parent = True
-    else:
-        use_remote_parent = False
-        clear_parent = False
     return {
         'parameters': parameters,
         'restart': restart,
         'recover': recover_before or recover,
-        'use_remote_parent': use_remote_parent,
-        'clear_parent': clear_parent,
+        'keep_parent': parent_mode == 'keep',
+        'use_remote_parent': parent_mode == 'remote',
     }
 
 
@@ -1000,22 +984,13 @@ def finalize_neb_carry(
     parent_mode: str,
 ) -> NebCarry:
     """Carry the next ``neb`` inputs; node selection stays in the graph body."""
-    if parent_mode == 'remote':
-        use_remote_parent = True
-        clear_parent = False
-    elif parent_mode == 'none':
-        use_remote_parent = False
-        clear_parent = True
-    else:
-        use_remote_parent = False
-        clear_parent = False
     return {
         'parameters': parameters,
         'pw_parameters': pw_parameters,
         'tried': tried,
         'restart': restart,
-        'use_remote_parent': use_remote_parent,
-        'clear_parent': clear_parent,
+        'keep_parent': parent_mode == 'keep',
+        'use_remote_parent': parent_mode == 'remote',
     }
 
 
@@ -1066,70 +1041,6 @@ def final_neb_image_structure(images: orm.TrajectoryData) -> orm.StructureData:
     return images.get_step_structure(-1)
 
 
-class NebStaticWrapper(WorkChain):
-    """Single-shot static-port wrapper around ``NebCalculation`` for graph placement.
-
-    The graph layer cannot close the required nested-dynamic ``pw`` namespace of
-    ``NebCalculation`` through ``task(..., inputs=...)``. This wrapper takes one
-    pseudo per the fixed example kind and fills ``pw.pseudos`` at runtime, where
-    dynamic namespaces are unrestricted. It submits exactly one calculation and
-    propagates its exit status, so the graph retry loop observes the same declared
-    failures as a direct placement, at the cost of one work chain level per attempt.
-    """
-
-    @classmethod
-    def define(cls, spec) -> None:  # type: ignore[override]
-        super().define(spec)
-        spec.input('code', valid_type=orm.Code)
-        spec.input('images', valid_type=orm.TrajectoryData)
-        spec.input('pseudo', valid_type=UpfData)
-        spec.input('parameters', valid_type=orm.Dict)
-        spec.input('pw_parameters', valid_type=orm.Dict)
-        spec.input('kpoints', valid_type=orm.KpointsData)
-        spec.input('settings', valid_type=orm.Dict, required=False)
-        spec.input('parent_folder', valid_type=orm.RemoteData, required=False)
-        spec.output('remote_folder', valid_type=orm.RemoteData, required=False)
-        spec.output('output_parameters', valid_type=orm.Dict)
-        spec.output('output_trajectory', valid_type=orm.TrajectoryData)
-        spec.output('output_mep', valid_type=orm.ArrayData)
-        spec.output('iteration_array', valid_type=orm.ArrayData, required=False)
-        for member in NebErrors:
-            spec.exit_code(member.value.status, member.name, message=member.value.message)
-        spec.outline(cls.run_neb, cls.results)
-
-    def run_neb(self):
-        """Submit one ``NebCalculation`` with the static inputs wired into ``pw``."""
-        inputs = AttributeDict(
-            {
-                'code': self.inputs.code,
-                'images': self.inputs.images,
-                'parameters': self.inputs.parameters,
-                'pw': {
-                    'parameters': self.inputs.pw_parameters,
-                    'pseudos': {'Si': self.inputs.pseudo},
-                    'kpoints': self.inputs.kpoints,
-                },
-            }
-        )
-        if 'settings' in self.inputs:
-            inputs.settings = self.inputs.settings
-        if 'parent_folder' in self.inputs:
-            inputs.parent_folder = self.inputs.parent_folder
-        node = self.submit(NebCalculation, **inputs)
-        return ToContext(neb=node)
-
-    def results(self):
-        """Attach the calculation outputs and propagate its exit status."""
-        node = self.ctx.neb
-        for name in ('remote_folder', 'output_parameters', 'output_trajectory', 'output_mep', 'iteration_array'):
-            if name in node.outputs:
-                self.out(name, node.outputs[name])
-        if node.is_finished_ok:
-            return None
-        msg = node.exit_message or f'neb failed with status {node.exit_status}'
-        return ExitCode(node.exit_status, msg)
-
-
 @task
 def make_kpoints_mesh(
     structure: orm.StructureData | None, distance: float | None, force_parity: bool
@@ -1141,9 +1052,8 @@ def make_kpoints_mesh(
     functions. The stored node carries this task label instead. Missing inputs fail
     fast here, naming the offending value, so no separate validation task is needed.
     """
-    from numpy import linalg
-
     from aiida.orm import KpointsData
+    from numpy import linalg
 
     if distance is None:
         msg = 'neither `kpoints` nor `kpoints_distance` was provided.'
@@ -1189,9 +1099,9 @@ def rattle_positions(structure: orm.StructureData, stdev: float) -> orm.Structur
     return rattled
 
 
-pw_calc = task(PwCalculation, inputs={'pseudos': {'Si': UpfData}}, errors=PwErrors)
+pw_calc = task(PwCalculation, inputs={'pseudos': orm.DataDict}, errors=PwErrors)
 ph_calc = task(PhCalculation, errors=PhErrors)
-neb_calc = task(NebStaticWrapper, errors=NebErrors)
+neb_calc = task(NebCalculation, inputs={'pw': {'pseudos': orm.DataDict}}, errors=NebErrors)
 q2r_calc = task(Q2rCalculation)
 matdyn_calc = task(MatdynCalculation)
 bands_calc = task(BandsCalculation)
@@ -1203,24 +1113,24 @@ rattle_task = rattle_positions
 def pw_base_graph(
     code: orm.Code,
     structure: orm.StructureData,
-    pseudo: UpfData,
+    pseudos: orm.DataDict,
     parameters: dict,
     settings: dict | None = None,
     kpoints: orm.KpointsData | None = None,
     kpoints_distance: float | None = None,
     kpoints_force_parity: bool = False,
+    parent_folder: orm.RemoteData | None = None,
     max_iterations: int = 5,
 ) -> dict:
     """Run ``pw.x`` with automated restarts, returning the outputs plus a report.
 
-    Restarts that need the failed run's outputs (walltime, ionic, electronic full
-    restarts) fail loudly at ``require_pw_restart_nodes``: mapped error arms hide the
-    failed calculation's ``remote_folder``/``output_structure``. Only parameter-only
-    (diagonalization) and success-path (insufficient bands) restarts recover.
-
-    The ``pseudos`` shape is fixed to one ``Si`` kind; add entries to the ``pw_calc``
-    declaration for structures with other kind names. Scheduler options travel in
-    ``task_metadata`` keyed by placement name at launch.
+    This is the reusable native restart loop for composite graphs: restarts that
+    need the failed run's outputs (walltime full restarts, ionic output-structure
+    restarts, electronic full restarts) rebind the preserved ``remote_folder`` and
+    ``output_structure`` and recover; ``require_pw_restart_nodes`` fails loudly
+    only when the failed run genuinely never stored the needed node.
+    ``parameters`` accepts a plain ``dict`` or an ``orm.Dict``. Scheduler options
+    travel in ``task_metadata`` keyed by placement name at launch.
     """
     if kpoints is None:
         resolved_kpoints = gen_kpoints(
@@ -1232,10 +1142,11 @@ def pw_base_graph(
     run = pw_calc(
         code=code,
         structure=structure,
-        pseudos={'Si': pseudo},
+        pseudos=pseudos,
         parameters=parameters,
         settings=settings,
         kpoints=resolved_kpoints,
+        parent_folder=parent_folder,
     )
     plan_walltime = handle_pw_walltime(error=run.error, parameters=parameters, tried=tried)
     plan_diagonalization = handle_pw_diagonalization(
@@ -1282,7 +1193,7 @@ def pw_base_graph(
     # Literal binding: graph bodies cannot read module constants, so the shared
     # ``_RATTLE_STDEV`` value is spelled out once here.
     stdev = 0.01
-    parent = None
+    parent = parent_folder
     if plan_ionic.rattle_now and run.output_structure is not None:
         rattled = rattle_task(structure=run.output_structure, stdev=stdev)
     else:
@@ -1307,9 +1218,11 @@ def pw_base_graph(
         structure = run.output_structure
     if plan_bands.rattle_now:
         structure = rattled
-    if final.use_remote_parent and run.remote_folder is not None:
+    if final.keep_parent:
+        parent = parent  # noqa: PLW0127 - keep arm rebinds the same wire to stay nullable
+    elif final.use_remote_parent:
         parent = run.remote_folder
-    if final.clear_parent:
+    else:
         parent = None
     restart = plan_bands.restart
     attempts = 1
@@ -1318,7 +1231,7 @@ def pw_base_graph(
         run = pw_calc(
             code=code,
             structure=structure,
-            pseudos={'Si': pseudo},
+            pseudos=pseudos,
             parameters=final.parameters,
             settings=settings,
             kpoints=resolved_kpoints,
@@ -1390,9 +1303,11 @@ def pw_base_graph(
             structure = run.output_structure
         if plan_bands.rattle_now:
             structure = rattled
-        if final.use_remote_parent and run.remote_folder is not None:
+        if final.keep_parent:
+            parent = parent  # noqa: PLW0127 - keep arm rebinds the same wire to stay nullable
+        elif final.use_remote_parent:
             parent = run.remote_folder
-        if final.clear_parent:
+        else:
             parent = None
         restart = plan_bands.restart
     checked = ensure_pw_recovered(error=run.error, restart=restart)
@@ -1408,6 +1323,7 @@ def pw_base_graph(
         'output_trajectory': run.output_trajectory,
         'output_kpoints': run.output_kpoints,
         'output_atomic_occupations': run.output_atomic_occupations,
+        'remote_folder': run.remote_folder,
         'report': report,
     }
 
@@ -1485,9 +1401,11 @@ def ph_base_graph(
         recover_before=False,
         after=guard,
     )
-    if final.use_remote_parent and run.remote_folder is not None:
+    if final.keep_parent:
+        parent = parent  # noqa: PLW0127 - keep arm rebinds the same wire to stay nullable
+    elif final.use_remote_parent:
         parent = run.remote_folder
-    if final.clear_parent:
+    else:
         parent = None
     restart = plan_convergence.restart
     attempts = 1
@@ -1535,9 +1453,11 @@ def ph_base_graph(
             recover_before=final.recover,
             after=guard,
         )
-        if final.use_remote_parent and run.remote_folder is not None:
+        if final.keep_parent:
+            parent = parent  # noqa: PLW0127 - keep arm rebinds the same wire to stay nullable
+        elif final.use_remote_parent:
             parent = run.remote_folder
-        if final.clear_parent:
+        else:
             parent = None
         restart = plan_convergence.restart
     checked = ensure_ph_recovered(error=run.error, restart=restart)
@@ -1556,23 +1476,23 @@ def ph_base_graph(
 def neb_base_graph(
     code: orm.Code,
     images: orm.TrajectoryData,
-    pseudo: UpfData,
+    pseudos: orm.DataDict,
     parameters: dict,
     pw_parameters: dict,
     settings: dict | None = None,
     kpoints: orm.KpointsData | None = None,
     kpoints_distance: float | None = None,
     kpoints_force_parity: bool = False,
+    parent_folder: orm.RemoteData | None = None,
     max_iterations: int = 5,
 ) -> dict:
     """Run ``neb.x`` with automated restarts, returning the outputs plus a report.
 
-    Remote restarts fail loudly at ``require_neb_restart_nodes``: mapped error arms
-    hide the failed calculation's ``remote_folder``. Only diagonalization cycling
-    (parameter-only) recovers.
-
-    The nested ``pw.pseudos`` shape is fixed to one ``Si`` kind; add entries to the
-    ``neb_calc`` declaration for structures with other kind names.
+    Remote restarts rebind the preserved ``remote_folder`` and recover;
+    ``require_neb_restart_nodes`` fails loudly only when the failed run genuinely
+    never stored one. ``parameters`` accepts a plain ``dict`` or an ``orm.Dict``.
+    Scheduler options travel in ``task_metadata`` keyed by placement name at
+    launch.
     """
     last_structure = final_neb_image_structure(images=images)
     if kpoints is None:
@@ -1586,11 +1506,14 @@ def neb_base_graph(
     run = neb_calc(
         code=code,
         images=images,
-        pseudo=pseudo,
         parameters=parameters,
-        pw_parameters=pw_parameters,
+        pw={
+            'parameters': pw_parameters,
+            'pseudos': pseudos,
+            'kpoints': resolved_kpoints,
+        },
         settings=settings,
-        kpoints=resolved_kpoints,
+        parent_folder=parent_folder,
     )
     plan_diagonalization = handle_neb_diagonalization(
         error=run.error, parameters=parameters, pw_parameters=pw_parameters, tried=tried
@@ -1620,7 +1543,7 @@ def neb_base_graph(
         restart=plan_nstep.restart,
         parent_mode=plan_nstep.parent_mode,
     )
-    parent = None
+    parent = parent_folder
     guard = require_neb_restart_nodes(
         restart=plan_electronic.restart,
         parent_mode=plan_electronic.parent_mode,
@@ -1634,9 +1557,11 @@ def neb_base_graph(
         parent_mode=plan_electronic.parent_mode,
         after=guard,
     )
-    if final.use_remote_parent and run.remote_folder is not None:
+    if final.keep_parent:
+        parent = parent  # noqa: PLW0127 - keep arm rebinds the same wire to stay nullable
+    elif final.use_remote_parent:
         parent = run.remote_folder
-    if final.clear_parent:
+    else:
         parent = None
     restart = plan_electronic.restart
     attempts = 1
@@ -1645,12 +1570,14 @@ def neb_base_graph(
         run = neb_calc(
             code=code,
             images=images,
-            pseudo=pseudo,
             parameters=final.parameters,
-            pw_parameters=final.pw_parameters,
+            pw={
+                'parameters': final.pw_parameters,
+                'pseudos': pseudos,
+                'kpoints': resolved_kpoints,
+            },
             settings=settings,
             parent_folder=parent,
-            kpoints=resolved_kpoints,
         )
         plan_diagonalization = handle_neb_diagonalization(
             error=run.error, parameters=final.parameters, pw_parameters=final.pw_parameters, tried=final.tried
@@ -1693,9 +1620,11 @@ def neb_base_graph(
             parent_mode=plan_electronic.parent_mode,
             after=guard,
         )
-        if final.use_remote_parent and run.remote_folder is not None:
+        if final.keep_parent:
+            parent = parent  # noqa: PLW0127 - keep arm rebinds the same wire to stay nullable
+        elif final.use_remote_parent:
             parent = run.remote_folder
-        if final.clear_parent:
+        else:
             parent = None
         restart = plan_electronic.restart
     checked = ensure_neb_recovered(error=run.error, restart=restart)
@@ -1709,6 +1638,7 @@ def neb_base_graph(
         'output_trajectory': run.output_trajectory,
         'output_mep': run.output_mep,
         'iteration_array': run.iteration_array,
+        'remote_folder': run.remote_folder,
         'report': report,
     }
 

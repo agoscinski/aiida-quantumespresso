@@ -8,54 +8,74 @@
 ############################################################################
 """Native ``@graph`` orchestration for PW relax and PW bands.
 
-This module rewrites the *orchestration* of :class:`PwRelaxWorkChain
-<aiida_quantumespresso.workflows.pw.relax.PwRelaxWorkChain>` and :class:`PwBandsWorkChain
-<aiida_quantumespresso.workflows.pw.bands.PwBandsWorkChain>` as ``@graph`` workflows. The legacy
-``WorkChain`` classes are preserved untouched; the graphs place them (through :class:`PwBaseStep`) instead of
-re-implementing them. Science stays where it was: restart and error handling inside ``PwBaseWorkChain``,
-k-point generation inside ``create_kpoints_from_distance``, path generation inside
-``seekpath_structure_analysis``. The graphs only wire names, branch on explicit predicates, and loop with inline
-counters; every ``@task`` body delegates to the existing implementations.
+The graphs place the native :func:`pw_base_graph
+<aiida_quantumespresso.workflows.graphs.base.pw_base_graph>` subgraph for every
+``pw.x`` run. No ``WorkChain`` is placed or imported here. Science stays where it
+was: restarts and error handling inside ``pw_base_graph``, k-point generation
+inside ``create_kpoints_from_distance``, path generation inside
+``seekpath_structure_analysis``. The graphs only wire names, branch on explicit
+predicates, and loop with inline counters; every ``@task`` body delegates to the
+existing implementations.
 
 Run the checks with the pinned experimental core and QE dependencies installed::
 
     uv run pytest aiida-quantumespresso/tests/graphs/test_pw.py -q
 
-and validate without launching anything with ``assert pw_relax_graph.build() is None``. The sibling
-``graphs/base.py`` track owns ``graphs/__init__.py``; the test module falls back to a stub if that package
-import ever fails, so these tests collect regardless (see the import guard there).
+and validate without launching anything with ``assert pw_relax_graph.build() is None``.
 
-Honest limits of this rewrite (see ``reports/pw-migration.md`` for the full record):
+Scheduler options
+-----------------
 
-* ``PwBaseWorkChain`` cannot be placed directly: its ``pw`` namespace is dynamic *and* required (it nests the
-  dynamic, required ``pseudos`` mapping), and the graph compiler only closes one dynamic level under a static
-  parent. :class:`PwBaseStep` therefore routes one base run through fully static ports, at the cost of one extra
-  ``WorkChain`` node per step. Pseudopotentials travel as an ``orm.DataDict`` (kind name to ``UpfData``), so all
-  entries must share one concrete node type and are stored as owned copies.
-* A base run that exits ``501`` (ionic convergence reached except in final SCF) fails the step instead of
-  triggering another iteration from the ``501`` structure: mapped error arms null out success outputs, so the
-  relaxed structure of a ``501`` run is unreachable downstream. Only success-path re-convergence (k-point mesh
-  regrowth, bounded iterations) is orchestrated here.
-* Graphs declare no exit codes: legacy statuses (relax ``400/401/402/403``, bands ``201/202/402/403``) collapse
-  into the single graph ``400 ERROR_TASK_FAILED``. Outcomes are reported through the ``report`` output instead.
-* Input validators moved into ``@task`` bodies and now surface as task failures, not launch-time
-  ``ValidationError``s. There is no ``clean_workdir`` handling, no ``dry_run``, and no monitor wiring.
-* ``scf``-mode relax echoes the input structure as ``output_structure`` where the legacy chain emits none.
+``CalcJob`` scheduler options travel at launch under ``task_metadata``, keyed by
+the ``pw.x`` placement name inside ``pw_base_graph`` (``'pw_calc'``), not through
+graph inputs. The experimental ``options`` ports of the previous revision were
+removed rather than silently ignored: passing scheduler options through a graph
+``Dict`` input would suggest per-iteration control that the native base graph
+does not offer (its options are constant across iterations). Form the launch
+mapping with :func:`task_metadata_for_options
+<aiida_quantumespresso.workflows.graphs.protocols.task_metadata_for_options>`::
+
+    from aiida_quantumespresso.workflows.graphs.protocols import task_metadata_for_options
+
+    task_metadata = task_metadata_for_options(pw_calc={'options': {'max_wallclock_seconds': 3600}})
+    run_get_node(pw_relax_graph, ..., task_metadata=task_metadata)
+
+Honest limits of this rewrite (see ``reports/refinement-composites.md``):
+
+* ``pw_base_graph`` is owned by the sibling ``graphs/base.py`` track; its agreed
+  contract is ``(code, structure, pseudos: DataDict, parameters, settings?,
+  kpoints?, kpoints_distance?, kpoints_force_parity?, parent_folder?)`` returning
+  ``output_parameters``/``output_structure?``/``output_band?``/``remote_folder``/
+  ``report``. Pseudopotentials travel as a ``DataDict`` (kind name to ``UpfData``).
+* A base run that exits ``501`` (ionic convergence reached except in final SCF)
+  fails the step instead of triggering another iteration from the ``501``
+  structure: mapped error arms null out success outputs, so the relaxed structure
+  of a ``501`` run is unreachable downstream. Only success-path re-convergence
+  (k-point mesh regrowth, bounded iterations) is orchestrated here.
+* Graphs declare no exit codes: legacy statuses (relax ``400/401/402/403``,
+  bands ``201/202/402/403``) collapse into the single graph ``400
+  ERROR_TASK_FAILED``. Outcomes are reported through the ``report`` output.
+* Input validators moved into ``@task`` bodies and now surface as task failures,
+  not launch-time ``ValidationError``s. There is no ``clean_workdir`` handling,
+  no ``dry_run``, and no monitor wiring.
+* ``scf``-mode relax echoes the input structure as ``output_structure`` where the
+  legacy chain emits none.
 """
 
 import copy
 import typing as t
 
 from aiida import orm
-from aiida.engine import PortModel, ToContext, WorkChain, graph, task
+from aiida.engine import PortModel, graph, task
 from aiida.orm import BandsData, Code, DataDict, Dict, Float, KpointsData, RemoteData, StructureData
+
 from aiida_quantumespresso.calculations.functions.create_kpoints_from_distance import (
     create_kpoints_from_distance as _create_kpoints_calcfunction,
 )
 from aiida_quantumespresso.calculations.functions.seekpath_structure_analysis import (
     seekpath_structure_analysis as _seekpath_calcfunction,
 )
-from aiida_quantumespresso.workflows.pw.base import PwBaseWorkChain
+from aiida_quantumespresso.workflows.graphs.base import pw_base_graph
 
 # Undecorated twins of the ``calcfunction`` implementations above. Graph tasks run as calculation processes and so
 # cannot call a decorated ``calcfunction`` (the engine forbids it); calling the shared undecorated implementation
@@ -66,7 +86,6 @@ _seekpath_structure_analysis = _seekpath_calcfunction.__wrapped__
 __all__ = (
     'BandPath',
     'BandsOutputs',
-    'PwBaseStep',
     'RelaxNext',
     'RelaxOutputs',
     'ensure_structure',
@@ -76,95 +95,8 @@ __all__ = (
     'pw_bands_graph',
     'pw_relax_graph',
     'resolve_bands_parameters',
-    'run_pw_base',
     'summarize_relax',
 )
-
-
-class PwBaseStep(WorkChain):
-    """Route one ``PwBaseWorkChain`` run through fully static ports.
-
-    The base chain cannot be placed in a graph directly: ``pw`` is a dynamic *and* required namespace nesting the
-    dynamic, required ``pseudos`` mapping, which the graph compiler cannot close. This step therefore exposes the
-    routed subset as static leaves and assembles the base inputs in its body. ``pseudos`` arrives as a
-    :class:`~aiida.orm.DataDict` mapping kind names to pseudopotential nodes; entries are passed on unchanged.
-    Scheduler options travel as a plain ``Dict`` and are forwarded to ``pw.metadata.options``.
-    """
-
-    @classmethod
-    def define(cls, spec) -> None:  # type: ignore[override]
-        """Define the process specification."""
-        super().define(spec)
-        spec.input('structure', valid_type=StructureData, help='The structure for this base run.')
-        spec.input('parameters', valid_type=Dict, help='The ``pw.parameters`` for this base run.')
-        spec.input('code', valid_type=Code, help='The ``quantumespresso.pw`` code for this base run.')
-        spec.input(
-            'pseudos',
-            valid_type=DataDict,
-            help='Mapping of structure kind names onto pseudopotential nodes for ``pw.pseudos``.',
-        )
-        spec.input('kpoints', valid_type=KpointsData, required=False, help='Explicit k-points for this base run.')
-        spec.input(
-            'kpoints_distance',
-            valid_type=Float,
-            required=False,
-            help='Minimum k-point distance used to generate the mesh from the input structure.',
-        )
-        spec.input('settings', valid_type=Dict, required=False, help='The ``pw.settings`` for this base run.')
-        spec.input(
-            'parent_folder',
-            valid_type=RemoteData,
-            required=False,
-            help='The ``pw.parent_folder`` restart folder for this base run.',
-        )
-        spec.input(
-            'options',
-            valid_type=Dict,
-            required=False,
-            help='Scheduler options forwarded to ``pw.metadata.options``.',
-        )
-        spec.outline(cls.run_base, cls.inspect_base, cls.results)
-        spec.exit_code(401, 'ERROR_SUB_PROCESS_FAILED', message='The `PwBaseWorkChain` sub process failed.')
-        spec.expose_outputs(PwBaseWorkChain)
-
-    def run_base(self):  # type: ignore[no-untyped-def]
-        """Submit the ``PwBaseWorkChain`` with the routed inputs."""
-        pw_inputs: dict[str, t.Any] = {
-            'structure': self.inputs.structure,
-            'parameters': self.inputs.parameters,
-            'code': self.inputs.code,
-            'pseudos': {kind: self.inputs.pseudos[kind] for kind in self.inputs.pseudos},
-        }
-        if 'settings' in self.inputs:
-            pw_inputs['settings'] = self.inputs.settings
-        if 'parent_folder' in self.inputs:
-            pw_inputs['parent_folder'] = self.inputs.parent_folder
-        if 'options' in self.inputs:
-            pw_inputs['metadata'] = {'options': self.inputs.options.get_dict()}
-
-        inputs: dict[str, t.Any] = {'pw': pw_inputs}
-        if 'kpoints' in self.inputs:
-            inputs['kpoints'] = self.inputs.kpoints
-        if 'kpoints_distance' in self.inputs:
-            inputs['kpoints_distance'] = self.inputs.kpoints_distance
-
-        running = self.submit(PwBaseWorkChain, **inputs)
-        self.report(f'launching PwBaseWorkChain<{running.pk}> through static-port routing.')
-        return ToContext(base=running)
-
-    def inspect_base(self):  # type: ignore[no-untyped-def]
-        """Fail the step when the base work chain did not finish successfully."""
-        if not self.ctx.base.is_finished_ok:
-            self.report(f'PwBaseWorkChain failed with exit status {self.ctx.base.exit_status}')
-            return self.exit_codes.ERROR_SUB_PROCESS_FAILED
-        return None
-
-    def results(self):  # type: ignore[no-untyped-def]
-        """Attach the base work chain outputs."""
-        self.out_many(self.exposed_outputs(self.ctx.base, PwBaseWorkChain))
-
-
-run_pw_base = task(PwBaseStep)
 
 
 class RelaxNext(t.TypedDict):
@@ -233,7 +165,7 @@ def prepare_next_relax(
     meshes before and after are regenerated with the undecorated twin of :func:`create_kpoints_from_distance
     <aiida_quantumespresso.calculations.functions.create_kpoints_from_distance.create_kpoints_from_distance>`; a
     grown mesh requests another iteration. Pulay-stress reruns (base exit status ``501``) never reach this task:
-    the routing step fails first, so the graph fails instead of retrying.
+    the base subgraph fails first, so the graph fails instead of retrying.
 
     :param parameters: the parameters the finished iteration ran with.
     :param output_parameters: the ``output_parameters`` of the finished base run.
@@ -371,7 +303,6 @@ def init_relax_guarded(
     kpoints_distance: Float | None = None,
     settings: Dict | None = None,
     parent_folder: RemoteData | None = None,
-    options: Dict | None = None,
 ) -> StructureData:
     """Run one initial relaxation and guarantee its output structure.
 
@@ -383,19 +314,17 @@ def init_relax_guarded(
     :param kpoints_distance: mesh density, if any.
     :param settings: the ``pw.settings``, if any.
     :param parent_folder: the ``pw.parent_folder``, if any.
-    :param options: scheduler options, if any.
     :return: the relaxed structure.
     """
-    initial = run_pw_base(
-        structure=structure,
-        parameters=parameters,
+    initial = pw_base_graph(
         code=code,
+        structure=structure,
         pseudos=pseudos,
+        parameters=parameters,
+        settings=settings,
         kpoints=kpoints,
         kpoints_distance=kpoints_distance,
-        settings=settings,
         parent_folder=parent_folder,
-        options=options,
     )
     return ensure_structure(candidate=initial.output_structure)
 
@@ -413,16 +342,17 @@ def pw_relax_graph(
     kpoints_force_parity: bool = False,
     settings: Dict | None = None,
     parent_folder: RemoteData | None = None,
-    options: Dict | None = None,
     run_init_relax: bool = False,
     init_parameters: Dict | None = None,
 ) -> RelaxOutputs:
-    """Relax a structure through repeated static-port ``PwBaseWorkChain`` runs, then report.
+    """Relax a structure through repeated native base runs, then report.
 
     An optional initial relaxation runs first when ``run_init_relax`` holds (it shares code, pseudopotentials,
-    k-points, settings, and options with the main loop; only ``init_parameters`` may differ, defaulting to the main
-    parameters). The main loop reruns while the mesh-regrowth predicate holds and the inline attempt budget lasts,
-    then a summary task records the outcome. The root returns the existing final structure and the summary node.
+    k-points, settings, and parent folder with the main loop; only ``init_parameters`` may differ, defaulting to the
+    main parameters). The main loop reruns while the mesh-regrowth predicate holds and the inline attempt budget
+    lasts, then a summary task records the outcome. The root returns the existing final structure and the summary
+    node. Scheduler options ride at launch under ``task_metadata`` (see the module docstring); there is no
+    per-iteration ``options`` port.
 
     :param structure: the structure to relax.
     :param parameters: the ``pw.parameters`` for the main relax loop.
@@ -435,7 +365,6 @@ def pw_relax_graph(
     :param kpoints_force_parity: whether generated meshes preserve parity.
     :param settings: the ``pw.settings`` shared by every run, if any.
     :param parent_folder: the ``pw.parent_folder`` shared by every run, if any.
-    :param options: scheduler options shared by every run, if any.
     :param run_init_relax: whether to run the initial relaxation.
     :param init_parameters: the parameters of the initial relaxation, defaulting to ``parameters``.
     :return: the relaxed structure and the summary report.
@@ -451,22 +380,21 @@ def pw_relax_graph(
             kpoints_distance=kpoints_distance,
             settings=settings,
             parent_folder=parent_folder,
-            options=options,
         )
     params = parameters
     attempts = 0
     rerun = True
     while rerun and attempts < max_iterations:
-        step = run_pw_base(
-            structure=current,
-            parameters=params,
+        step = pw_base_graph(
             code=code,
+            structure=current,
             pseudos=pseudos,
+            parameters=params,
+            settings=settings,
             kpoints=kpoints,
             kpoints_distance=kpoints_distance,
-            settings=settings,
+            kpoints_force_parity=kpoints_force_parity,
             parent_folder=parent_folder,
-            options=options,
         )
         decision = prepare_next_relax(
             parameters=params,
@@ -505,14 +433,13 @@ def pw_bands_graph(
     nbands_factor: Float | None = None,
     scf_settings: Dict | None = None,
     bands_settings: Dict | None = None,
-    scf_options: Dict | None = None,
-    bands_options: Dict | None = None,
 ) -> BandsOutputs:
     """Compute a band structure along a SeekPath path (or explicit k-points) through SCF plus bands runs.
 
     The path adapter normalizes the structure unless explicit bands k-points are given; the SCF run feeds its remote
-    folder and band count into the bands run. The root returns the existing step outputs, leaving the SeekPath leaves
-    out when explicit k-points were given.
+    folder and band count into the bands run. Scheduler options ride at launch under ``task_metadata`` (see the
+    module docstring); there are no per-run ``options`` ports. The root returns the existing step outputs, leaving
+    the SeekPath leaves out when explicit k-points were given.
 
     :param structure: the structure to compute the bands of.
     :param scf_parameters: the ``pw.parameters`` of the SCF run.
@@ -527,8 +454,6 @@ def pw_bands_graph(
     :param nbands_factor: multiplier of the SCF band count for the bands run, if any.
     :param scf_settings: the SCF ``pw.settings``, if any.
     :param bands_settings: the bands ``pw.settings``, if any.
-    :param scf_options: the SCF scheduler options, if any.
-    :param bands_options: the bands scheduler options, if any.
     :return: the band structure, both parameter sets, and the SeekPath products when computed.
     """
     path = prepare_kpoints_path(
@@ -538,28 +463,26 @@ def pw_bands_graph(
         scf_structure = path.primitive_structure
     else:
         scf_structure = structure
-    scf = run_pw_base(
-        structure=scf_structure,
-        parameters=scf_parameters,
+    scf = pw_base_graph(
         code=scf_code,
+        structure=scf_structure,
         pseudos=pseudos,
+        parameters=scf_parameters,
+        settings=scf_settings,
         kpoints=scf_kpoints,
         kpoints_distance=scf_kpoints_distance,
-        settings=scf_settings,
-        options=scf_options,
     )
     resolved = resolve_bands_parameters(
         scf_output_parameters=scf.output_parameters, bands_parameters=bands_parameters, nbands_factor=nbands_factor
     )
-    bands = run_pw_base(
-        structure=scf_structure,
-        parameters=resolved,
+    bands = pw_base_graph(
         code=bands_code,
+        structure=scf_structure,
         pseudos=pseudos,
+        parameters=resolved,
+        settings=bands_settings,
         kpoints=path.explicit_kpoints,
         parent_folder=scf.remote_folder,
-        settings=bands_settings,
-        options=bands_options,
     )
     return {
         'band_structure': bands.output_band,

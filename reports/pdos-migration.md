@@ -1,5 +1,9 @@
 # PDOS graph migration
 
+> Historical worker handoff / earlier audit. For integrated validation and current
+> conclusions, see [graph-migration.md](graph-migration.md); interim failures and
+> test totals below are not the final combined result.
+
 Native `@graph` rewrite of `PdosWorkChain`
 (`aiida-quantumespresso/src/aiida_quantumespresso/workflows/pdos.py`)
 as `aiida_quantumespresso.workflows.graphs.pdos`.

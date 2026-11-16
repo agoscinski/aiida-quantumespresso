@@ -1,5 +1,9 @@
 # PW relax / PW bands graph migration
 
+> Historical worker handoff / earlier audit. For integrated validation and current
+> conclusions, see [graph-migration.md](graph-migration.md); interim failures and
+> test totals below are not the final combined result.
+
 - **Track:** native `@graph` orchestration for `PwRelaxWorkChain` and `PwBandsWorkChain` (`aiida-quantumespresso`).
 - **Owned files (this track only):** `src/aiida_quantumespresso/workflows/graphs/pw.py`,
   `tests/graphs/test_pw.py`, `reports/pw-migration.md`. No other QE file, no shared `pyproject`/CI/`__init__`,

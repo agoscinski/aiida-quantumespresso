@@ -1,5 +1,9 @@
 # Graph-layer migration feasibility audit — `aiida-quantumespresso`
 
+> Historical worker handoff / earlier audit. For integrated validation and current
+> conclusions, see [graph-migration.md](graph-migration.md); interim failures and
+> test totals below are not the final combined result.
+
 - **Audit scope:** can the current `WorkChain` layer be rewritten onto the `@graph`/`@task` API, and what must the integration CI pin to test it honestly?
 - **Core under audit:** parent checkout at `3db2173f3c4761a4968595b2fdfeb7f3c63d8d32` (fork `agoscinski/aiida-core`, branch `graph-authoring-demo-v3`; verified pushed, branch head == SHA).
 - **QE checkout under audit:** `rewrite` branch at `7568266` (`PpCalculation: PARENT_FOLDER_SYMLINK`).

@@ -1,5 +1,9 @@
 # QE base-workflow graph migration
 
+> Historical worker handoff / earlier audit. For integrated validation and current
+> conclusions, see [graph-migration.md](graph-migration.md); interim failures and
+> test totals below are not the final combined result.
+
 Owner: base workflows only — `aiida-quantumespresso/src/aiida_quantumespresso/workflows/graphs/base.py`
 (+ `graphs/__init__.py`), `aiida-quantumespresso/tests/graphs/test_base.py`, this report.
 Composites and integration are other workers' scope; their files were not touched.

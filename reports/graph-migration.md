@@ -1,147 +1,160 @@
-# Quantum ESPRESSO graph migration — verification report
+# Native Quantum ESPRESSO graphs — validated refinement
 
 ## Verdict
 
-**Not feature-complete. Experimental alternatives, not a replacement release.**
-All nine legacy workflow families have graph alternatives, but important restart,
-protocol, validation, cleanup, output, and exit-code contracts are not preserved.
-Existing workflow entry points deliberately still resolve to the legacy WorkChains.
-Do not use the graph alternatives as production-compatible substitutes.
+**The experimental graph implementation now uses zero WorkChains. It is still
+not feature-complete.** Legacy workflow modules and entry points are retained for
+compatibility; they are not called by the native graph implementation.
 
-The implementation targets `agoscinski/aiida-core` commit
-`3db2173f3c4761a4968595b2fdfeb7f3c63d8d32` (3.0.0.dev0), not released core 2.8.
-QE's stable dependency constraint is unchanged. Dedicated `graph` CI installs and
-verifies the exact experimental revision; ordinary CI tests the stable dependency.
+This refinement supersedes the earlier audit's blanket blocker statements.
+Protocols, ordered handlers, scientific Python, fixed heterogeneous fan-out, and
+serial PDOS do not require new graph language constructs. The audit response and
+essential-features analysis informed the changes below.
 
-## Work division and independent verification
+Required core revision: **`d2045e4ff2932725796e04801df4727ba72d5db3`**, pushed to
+`agoscinski/aiida-core`, branch `refactor/graph-qe-native`. Released core 2.8 and the
+previous pinned core do not implement these refinements. QE's stable dependency
+constraint and legacy entry points remain unchanged; dedicated graph CI explicitly
+installs and verifies the new core revision.
 
-Four worker agents owned disjoint tracks: six bases, PW relax/bands, PDOS, and
-framework/CI audit. A subsequent worker reviewed base production correctness.
-The coordinating agent reviewed integration, removed exception-swallowing test
-import fallbacks, ran all combined tests, checked isolated pytest configuration,
-and changed legacy imports from plumpy to AiiDA's public `ProcessState` and
-`PortNamespace` (needed with core 3, compatible with core 2).
+## Source changes
 
-Review found two serious bugs despite the original 79 passing tests:
+- `graphs/base.py`: direct PW/PH/NEB/Q2R/Matdyn/Bands CalcJob placements. Removed
+  `NebStaticWrapper`. General `pseudos: DataDict` replaces the Si-only contract;
+  native PW base takes an initial `parent_folder` and returns existing calculation
+  nodes, including the final remote folder, plus an explicit summary task output.
+- `graphs/pw.py`: removed `PwBaseStep` and legacy `PwBaseWorkChain` submission.
+  Relax, init-relax, and bands now orchestrate the native PW base subgraph.
+- `graphs/pdos.py`: native PW base for SCF/NSCF; direct DOS/PROJWFC placements.
+  Separate serial/parallel stage and root graphs. Serial execution orders
+  **DOS → DOS-folder sweep → PROJWFC**; independent parallel placements need no
+  `par_map`. Unqualified root names alias parallel roots.
+- `graphs/protocols.py`: ordinary YAML protocol loading/merging/overrides and
+  launch `task_metadata` helpers, without legacy class imports. These are **not
+  yet fully resolved protocol-to-submission helpers**: pseudo-family selection,
+  thresholds, all meta-parameters, and graph-input translation remain QE work.
+- Scheduler options now use launch `task_metadata`, not old wrapper input ports.
+  Experimental API changes are recorded in QE's `CHANGELOG.md`.
 
-1. Later handlers discarded earlier restart decisions. Decisions now propagate.
-2. Retry paths silently continued without failed-run nodes hidden by the graph
-   framework. Guards now fail explicitly rather than run degraded restarts.
+## Necessary core changes: implemented, not merely proposed
 
-Three new tests execute the **production** PW base graph with an external-placement
-substitute: first success, diagonalization recovery, and blocked walltime recovery.
-This caught wiring defects that copied graph bodies cannot establish. See
-[base-review.md](base-review.md) for evidence and exact remaining limits.
+1. **Mapped failed-process outputs are retained.** The runtime synthesizes `error`
+   alongside outputs actually stored by the child. Only genuinely missing outputs
+   remain absent. Existing wires, presence checks, decision tasks, and loops now
+   recover failed-run nodes; no new failure-record API was needed. Function tasks
+   returning `Err` retain their existing absent-success-arm behavior.
+2. **Typed container forwarding into dynamic input namespaces.** For example:
 
-## Coverage by legacy workflow family
+   ```python
+   pw_calc = task(PwCalculation, inputs={'pseudos': orm.DataDict}, errors=PwErrors)
+   neb_calc = task(NebCalculation, inputs={'pw': {'pseudos': orm.DataDict}}, errors=NebErrors)
+   ```
 
-| Family | Graph implementation | Missing / changed behavior |
-| --- | --- | --- |
-| PW base | Native retry loop and handler tasks | Only parameter-only diagonalization and success-path bands growth can recover; failed-node-dependent paths explicitly fail. Fixed Si pseudo shape; no monitor-message handling, considered-finished 501/710, or scheduler-time cap. |
-| PH base | Native retry loop and handler tasks | Parameter-only diagonalization supported; remote-folder recoveries blocked. No multi-recover output merge; explicit structure for q-point generation. |
-| NEB base | Native retry loop over static-port WorkChain shim | Parameter-only diagonalization supported; remote-folder-dependent recoveries blocked. Fixed Si pseudo shape and extra workflow node. |
-| Q2R base | Single CalcJob graph | No handlers in original; full API/output/cleanup parity and real external execution not verified. |
-| Matdyn base | Single CalcJob graph | Same qualification as Q2R. |
-| Bands base | Single CalcJob graph | Same qualification as Q2R. |
-| PW relax | Native init/iteration/convergence orchestration | Places legacy PW base through routing shim; no 501 Pulay recovery, protocol builders, full init namespaces, or cleanup. Zero-budget and SCF output behavior differ. |
-| PW bands | Native path → SCF → bands orchestration | Places legacy PW base; optional relax phase, full namespace forwarding/protocols/cleanup/legacy failure codes not preserved. |
-| PDOS | SCF → NSCF → parallel DOS/PROJWFC, or parent restart | Places legacy PW base; serial cleanup ordering, all optional outputs/protocols/validators/exit codes not preserved. |
+   The graph contract has a static `DataDict` leaf; dispatch expands members into
+   the process namespace and checks accepted node types. Recursive specialization
+   also closes enclosing dynamic namespaces. No routing WorkChain is needed.
+   Expansion itself preserves member objects; existing owned-container/process
+   boundary rules can detach members into standalone nodes. Do not claim universal
+   identity preservation across ownership boundaries.
 
-Detailed input/output maps and deviations: [base-migration.md](base-migration.md),
-[pw-migration.md](pw-migration.md), [pdos-migration.md](pdos-migration.md).
-These are worker handoff records; their original test totals/environment notes are
-historical. This report and base-review supersede earlier recovery/parity claims.
+Missing required mappings, wrong member types, and missing restart nodes fail
+explicitly. Optional absent mappings stay unwired; an independent review fixed a
+case that incorrectly inserted an empty nested namespace while dropping a wire.
 
-## Problems with the graph authoring layer
+## Work division and verification of workers
 
-### Highest priority
+Four workers owned core failed-output correction, core namespace forwarding,
+native bases, and native composites. Two subsequent independent workers reviewed
+core semantics and full nested QE execution. The coordinating agent integrated
+and verified their results rather than accepting isolated worker runs:
 
-1. **Failed-calculation data is inaccessible.** `errors=` gives an error enum but
-   masks all success outputs, even `remote_folder` and structures actually stored
-   by a failed child. QE restart handlers need those nodes. Expose a typed failed-run
-   record (outputs, exit status/message) without pretending the run succeeded.
-2. **Nested dynamic namespaces cannot be closed adequately.** PW-base's `pw.pseudos`
-   and NEB's nested input contract require routing WorkChains. Flat Si declarations
-   in the base track are not general pseudopotential support. Recursive static shape
-   specialization or typed owned mapping ports would remove this boilerplate.
-3. **Workflow failure vocabulary collapses.** A root cannot preserve QE's distinct
-   legacy exit statuses; most failures become `400 ERROR_TASK_FAILED`. A summary node
-   is not equivalent to a workflow exit contract. Add typed graph-level failure exits.
-4. **No reliable termination/failure cleanup equivalent.** Successful-path sweep tasks
-   do not replace `on_terminated`; failed remote calculations may leave directories.
-   Add structured finalization with explicit resource/provenance semantics.
+- Added the initially missing namespace-expansion dispatch hook.
+- Removed the base track's temporary package-import spoof and all eight non-strict
+  expected-failure markers. Their production tests now genuinely pass.
+- Replaced dynamic test-file loading with a regular relative import.
+- Corrected stale source explanations and misplaced changelog entries.
+- Ran repository-configured pre-commit hooks, not just an unrelated Ruff config.
+- Re-ran the combined QE suite and full selected core graph suite.
 
-### Authoring friction / contract gaps
+Worker handoff reports retain intermediate results for traceability. This report
+supersedes their interim failures and the original migration/review conclusions.
 
-- Conditional ordering (`after=` differing between branches), branch-local names,
-  and restricted branch shapes made PDOS serial ordering awkward or unavailable in
-  the current implementation. Distinguish deliberate language restrictions from
-  unnecessarily restrictive compiler wiring checks.
-- Scheduler `task_metadata` is placement-wide, not adjustable per iteration; restart
-  handlers cannot adapt scheduler/time settings naturally.
-- Static graph ports do not reproduce arbitrary monitor maps, protocol overrides,
-  or namespace validators. Runtime task validation happens later than legacy launch
-  validation. Graph `dry_run` is unsupported.
-- Function tasks are calculation processes: they cannot call decorated calcfunctions
-  or return existing input nodes as newly created outputs. The adapters use undecorated
-  implementations and clones where needed. These are provenance constraints, not bugs;
-  better authoring support for node selection would avoid unnecessary copies.
-- Annotation-resolution and optional-output conventions are easy to get wrong;
-  `TypedDict` must be total, while optional leaves need defaulted `PortModel` fields.
-- Whole-port mappings/collections and per-iteration node accumulation are awkward;
-  PH needs provenance-preserving output merging, not just value snapshots.
-- Serial loops, a 1000-iteration cap, stored-only execution, and the experimental
-  core dependency remain deployment constraints.
+## Validation results
 
-Framework source references and probes: [graph-layer-audit.md](graph-layer-audit.md).
+| Check | Result |
+| --- | --- |
+| Combined QE graph suite | **100 passed**, 6 warnings, 242.69 seconds |
+| Core graph suite, `-m presto -n 4` | **996 passed**, 4 warnings, 111.33 seconds |
+| Focused mapped-output + forwarding regressions | **42 passed** in independent review |
+| Core pre-commit on changed files | **Passed**, including Ruff and mypy |
+| QE pre-commit on changed source/tests | **Passed** |
+| Legacy workflow suite against new core | **89 failed, 106 passed, 1 skipped**, 27.74 seconds; protocol/core-3 compatibility remains red |
 
-## Local verification
-
-From the parent core checkout:
+Commands from the parent core checkout:
 
 ```sh
+uv run pytest -m presto tests/engine/processes/graphs -n 4 -q
 PYTHONPATH=aiida-quantumespresso/src uv run --with aiida-pseudo --with qe-tools \
   pytest aiida-quantumespresso/tests/graphs -q
+PYTHONPATH=aiida-quantumespresso/src uv run --with aiida-pseudo --with qe-tools \
+  pytest aiida-quantumespresso/tests/workflows -q --tb=line
 ```
 
-**87 passed, 4 warnings** (127.96 seconds). Repeated with isolated QE pytest root,
-`-c /dev/null --confcutdir tests`: **87 passed**, with additional SQLAlchemy warnings.
-No real QE executable, remote scheduler, daemon restart, or full PH/NEB runtime was
-validated. PW/PDOS composite runtime tests still use mirrored stub graphs; their
-production bodies have build checks, not full production-placement runtime coverage.
+### What execution coverage proves
 
-Legacy workflows against experimental core: full suite **89 failed, 106 passed,
-1 skipped** (28.44 seconds). The first failure,
-`tests/workflows/protocols/ph/test_base.py::test_default`, uses `orm.AbstractCode`,
-removed in core 3; protocol tests account for the failures. This compatibility
-problem is not a graph compiler defect, and must be migrated before a
-feature-complete core-3 release. The dedicated CI intentionally includes this
-regression gate rather than hiding it.
+- Real production PW base graph: success, diagonalization/walltime/ionic recovery,
+  failed-folder/structure rebinding by UUID, missing-node rejection, exhaustion,
+  initial restart folder, and multi-kind Si/O pseudo mappings.
+- Real production NEB base graph: direct CalcJob placement and diagonalization
+  recovery through nested `pw.pseudos` forwarding.
+- Full nested **relax/bands/serial-PDOS → native PW base → CalcJobs**, with only
+  external CalcJob implementations substituted. No copied graph bodies and no
+  replacement of the base graph in these integration tests. Assertions include
+  absence of WorkChain descendants, root provenance, output identity, SCF→bands
+  parent-folder identity, pseudo input links, and serial sweep ordering.
+- Other composite tests substitute the base subgraph with deterministic function
+  tasks; those test orchestration, not the complete nested stack.
 
-Both repository pre-commit hooks (Ruff lint and format) passed before pushing.
+These are deterministic local fake-executable/overridden-parser tests, **not real
+QE scientific validation**. PH recovery/merging, daemon-interruption behavior, real
+remote schedulers, and all CalcJob/parser output combinations are not verified.
+The local core suite includes pre-existing untracked graph tests; only the new
+mapping/failure tests and intended core source changes were committed.
+
+## Remaining problems, classified accurately
+
+### Framework execution guarantees / unresolved access
+
+- **Failure/cancellation finalization:** success-path sweeps do not replace
+  termination cleanup. Reliable cleanup requires defined finalization or an
+  external resource owner; no graph guarantee was added here.
+- **Actual child exit message:** output preservation does not expose it as a graph
+  value. QE's message-gated accuracy-stuck recovery remains unresolved.
+- **Per-attempt scheduler metadata:** launch metadata is fixed per placement.
+  Only required for policies that actually change scheduler configuration;
+  deriving QE `max_seconds` from a fixed scheduler limit is ordinary preparation.
+- **Forwarded namespaces inside directly task-mapped `par_map` calls:** not
+  covered by the new ProcessTask dispatch adapter. QE's fixed fan-out does not
+  need this path. Do not infer general map support from direct-placement tests.
+
+### QE implementation and compatibility work—not missing graph syntax
+
+- Complete protocol-to-launch resolution and boundary validation helpers.
+- PH provenance-preserving merge of recovered partial outputs.
+- Monitor input forwarding and the monitor-specific recovery policy.
+- All considered-finished exit states, optional bands relaxation phase, complete
+  output/option coverage, and fixed-scheduler-limit `max_seconds` preparation.
+- Recovery-handler coverage beyond the tested status paths; source translation
+  alone is not evidence of equivalence.
+- Prepared-input/dry-run inspection, legacy numeric exit-code compatibility, and
+  `orm.AbstractCode` protocol usage incompatible with core 3.
+- Distinct scheduler settings for subgraphs that reuse the same placement keys.
+
+A mutable ProcessBuilder, general Python graph bodies, decorated-calcfunction
+placement, a handler registry, or `par_map` for DOS/PROJWFC are **not prerequisites**.
+The existing undecorated scientific implementations can be reused in task bodies.
 
 ## Remote verification
 
-Pushed to `origin/rewrite` (`git@github.com:agoscinski/aiida-quantumespresso.git`).
-Implementation commit: `29622079b1b576522ec96682e2d4f9e3779595a0`.
-**CI-tested revision: `3b6cdbc8b78d051c5091993fa17ea5bad73dbbd9`**, which fixes
-YAML quoting in the new workflow. The subsequent report/docstring-only commit
-records these results; it does not change executable workflow behavior.
-
-| Run | Observed result |
-| --- | --- |
-| [Stable-core CI 43892033180](https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43892033180) | **Passed:** pre-commit and tests on Python 3.10, 3.11, 3.12, 3.13, 3.14. Graph modules explicitly skip on core 2.8, so this is compatibility coverage, not graph coverage. |
-| [Experimental-core graph CI 43892033060](https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43892033060) | **Failed overall:** pinned-core installation/revision check and graph tests **passed**; legacy workflow regression step **failed**. This is not a green migration gate. |
-
-The first graph workflow run (43891942001) failed workflow validation because a
-shell option containing `: ` was not a YAML block scalar. Corrected and re-pushed;
-the runs above are the valid rerun, not that initial invalid run.
-
-Verification used public GitHub Actions API job/step conclusions. The configured
-`gh` token is invalid and log download returned HTTP 403, so remote failure details
-could not be inspected. The 89-failure breakdown above is the **local** full-suite
-reproduction against the same core revision, not a claimed remote log transcript.
-
-**Release conclusion:** stable compatibility is green, graph tests are green, but
-experimental-core regression compatibility is red and scientific/restart parity
-is incomplete. Keep the legacy entry points; do not label this feature-complete.
+Pending the new QE source push and CI run. Earlier results in `ci-verification.json`
+refer to the previous implementation and must not be read as this revision's CI.

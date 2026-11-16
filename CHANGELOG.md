@@ -1,3 +1,17 @@
+## Unreleased
+
+### Breaking changes (experimental graph API only)
+
+* `workflows.graphs.base.pw_base_graph` and `neb_base_graph` now accept
+  `pseudos: DataDict` instead of a fixed single-kind `pseudo`, place CalcJobs
+  directly, and accept an initial `parent_folder`. `NebStaticWrapper` and
+  `workflows.graphs.pw.PwBaseStep`/`run_pw_base` have been removed; composite
+  graphs now call the native PW base subgraph.
+* Scheduler options for composites now go through launch-time `task_metadata`,
+  not `options` input ports. PDOS has explicit `_serial`/`_parallel` graph roots
+  instead of `serial_clean`; unqualified root names alias the parallel variant.
+  Legacy WorkChain entry points and APIs remain unchanged.
+
 ## v5.1.0
 
 This release adds support for Quantum ESPRESSO v7.6 and introduces the first calculation monitor, `accuracy_stuck`, which kills a `PwCalculation` whose SCF accuracy has plateaued.

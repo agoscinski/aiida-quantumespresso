@@ -8,72 +8,96 @@
 ############################################################################
 """Native ``@graph`` orchestration for the PDOS workflow.
 
-This module rewrites the *orchestration* of :class:`PdosWorkChain
-<aiida_quantumespresso.workflows.pdos.PdosWorkChain>` as ``@graph`` workflows. The legacy ``WorkChain`` is
-preserved untouched; the graphs place the original base work chains (through :class:`PwBaseStep
-<aiida_quantumespresso.workflows.graphs.pw.PwBaseStep>`, shared with the PW graphs) and the original ``dos.x``
-and ``projwfc.x`` calculations as tasks instead of re-implementing them. Science stays where it was: restarts and
-error handling inside ``PwBaseWorkChain``, the energy window in :func:`extract_nscf_window`, the band-count rule
-in :func:`resolve_nscf_parameters`, and the DOS parameter assembly in :func:`resolve_post_windows`. The graphs
-only wire names, pass whole namespaces between tasks, and sweep remote folders through dedicated tasks.
+The graphs place the native :func:`pw_base_graph
+<aiida_quantumespresso.workflows.graphs.base.pw_base_graph>` subgraph for the
+SCF/NSCF runs and the ``dos.x``/``projwfc.x`` calculations as tasks. No
+``WorkChain`` is placed or imported here. Science stays where it was: restarts
+and error handling inside ``pw_base_graph``, the energy window in
+:func:`extract_nscf_window`, the band-count rule in
+:func:`resolve_nscf_parameters`, and the DOS parameter assembly in
+:func:`resolve_post_windows`. The graphs only wire names and sweep remote
+folders through dedicated tasks.
 
 Run the checks with the pinned experimental core and QE dependencies installed::
 
     uv run pytest aiida-quantumespresso/tests/graphs/test_pdos.py -q
 
-and validate without launching anything with ``assert pdos_from_scratch.build() is None``.
+and validate without launching anything with ``assert pdos_from_scratch_parallel.build() is None``.
 
-The legacy workflow runs SCF optionally, so the rewrite exposes two static roots instead of one dynamic one:
-:func:`pdos_from_scratch` runs SCF then NSCF, while :func:`pdos_from_parent` starts from a caller-provided NSCF
-parent folder. Both delegate the NSCF-to-report stage to :func:`pdos_stage`.
+Serial versus parallel
+----------------------
 
-Honest limits of this rewrite (see ``reports/pdos-migration.md`` for the full record):
+The legacy ``serial_clean`` flag is replaced by explicit variants. The
+``*_parallel`` graphs run DOS and PROJWFC as soon as their inputs are ready, so
+the engine may run them concurrently. The ``*_serial`` graphs order
+DOS → cleanup → PROJWFC with an unconditional ``after`` edge, faithfully
+serializing the pair; the DOS remote is swept before PROJWFC submits, and the
+SCF remote (from-scratch roots) is swept after the stage. ``clean_workdir``
+only controls the final sweep of the remaining remotes. There is no
+branch-dependent ``after``: each variant hard-codes its own ordering.
 
-* ``PwBaseWorkChain`` cannot be placed directly: its ``pw`` namespace is dynamic *and* required (it nests the
-  dynamic, required ``pseudos`` mapping), and the graph compiler only closes one dynamic level under a static
-  parent. The shared :class:`PwBaseStep
-  <aiida_quantumespresso.workflows.graphs.pw.PwBaseStep>` therefore routes each base run through fully static
-  ports, at the cost of one extra ``WorkChain`` node per run. Pseudopotentials travel as an ``orm.DataDict``.
-* Graphs declare no exit codes: the legacy statuses (``401``-``404`` plus the restart ``301``/``302``/``401``/
-  ``402``) collapse into the single graph ``400 ERROR_TASK_FAILED``. Stage attribution survives in the child exit
-  statuses; the summary ``report`` is only emitted on success.
-* Input validators moved into ``@task`` bodies and now surface as task failures, not launch-time
-  ``ValidationError``s. The equality of ``emin``/``emax``/``deltae`` across DOS and PROJWFC is enforced by
-  :func:`resolve_post_windows`, which resolves both mappings from one window and returns them together.
-* ``serial_clean`` sweeps remote folders promptly after each calculation and no longer serializes DOS before
-  PROJWFC: the graph language merges branch arms by name and wiring, so conditional ordering between two
-  placements is inexpressible and both calculations stay dispatch-ready. The engine may therefore run them
-  concurrently; plan scratch-disk headroom of the legacy parallel mode. ``clean_workdir`` sweeps the remaining
-  remotes at the end through no-op-by-default tasks instead of ``on_terminated``.
-* There is no ``dry_run``, no monitor wiring, and no ``get_builder_from_protocol``: protocol presets stay on the
-  legacy work chain until graph-specific protocol builders are implemented.
+Scheduler options
+-----------------
+
+``CalcJob`` scheduler options travel at launch under ``task_metadata``, keyed
+by placement name (``'dos_calc'``/``'projwfc_calc'`` for the post-processing
+steps; the ``pw.x`` placements inside ``pw_base_graph`` take theirs under its
+own ``'pw_calc'`` key). The experimental per-bundle ``options`` ports of the
+previous revision were removed rather than silently ignored. Form the launch
+mapping with :func:`task_metadata_for_options
+<aiida_quantumespresso.workflows.graphs.protocols.task_metadata_for_options>`::
+
+    from aiida_quantumespresso.workflows.graphs.protocols import task_metadata_for_options
+
+    task_metadata = task_metadata_for_options(
+        dos_calc={'options': {'max_wallclock_seconds': 43200}},
+        projwfc_calc={'options': {'max_wallclock_seconds': 43200}},
+    )
+
+Honest limits of this rewrite (see ``reports/refinement-composites.md``):
+
+* Graphs declare no exit codes: the legacy statuses (``401``-``404`` plus the
+  restart ``301``/``302``/``401``/``402``) collapse into the single graph ``400
+  ERROR_TASK_FAILED``. Stage attribution survives in the child exit statuses;
+  the summary ``report`` is only emitted on success.
+* Input validators moved into ``@task`` bodies and now surface as task failures,
+  not launch-time ``ValidationError``s. The equality of ``emin``/``emax``/
+  ``deltae`` across DOS and PROJWFC is enforced by
+  :func:`resolve_post_windows`, which resolves both mappings from one window
+  and returns them together.
+* There is no ``dry_run`` and no monitor wiring. Protocol presets live in
+  :mod:`aiida_quantumespresso.workflows.graphs.protocols` as plain mappings;
+  pseudo-family and meta-parameter resolution still needs the caller.
 """
 
 import copy
 import typing as t
-from typing import Annotated, Any
 
-from aiida.engine import Forward, graph, task
-from aiida.orm import BandsData, Code, Dict, RemoteData, StructureData, XyData
+from aiida.engine import graph, task
+from aiida.orm import BandsData, Code, DataDict, Dict, Float, KpointsData, RemoteData, StructureData, XyData
 from aiida.orm.nodes.data.array.projection import ProjectionData
+
 from aiida_quantumespresso.calculations.dos import DosCalculation
 from aiida_quantumespresso.calculations.projwfc import ProjwfcCalculation
-from aiida_quantumespresso.workflows.graphs.pw import run_pw_base
+from aiida_quantumespresso.workflows.graphs.base import pw_base_graph
 
 __all__ = (
     'MatchedParameters',
-    'NscfBundle',
     'PdosFromParentOutputs',
     'PdosFromScratchOutputs',
     'PdosStageOutputs',
     'PdosWindow',
-    'ScfBundle',
     'dos_calc',
     'extract_nscf_window',
     'pdos_from_parent',
+    'pdos_from_parent_parallel',
+    'pdos_from_parent_serial',
     'pdos_from_scratch',
+    'pdos_from_scratch_parallel',
+    'pdos_from_scratch_serial',
     'pdos_stage',
-    'projwfc_calc',
+    'pdos_stage_parallel',
+    'pdos_stage_serial',
     'require_scf_parameters',
     'resolve_nscf_parameters',
     'resolve_post_windows',
@@ -85,14 +109,6 @@ __all__ = (
 dos_calc = task(DosCalculation)
 projwfc_calc = task(ProjwfcCalculation)
 
-ScfBundle = Annotated[Any, Forward(run_pw_base, exclude=('structure', 'parent_folder', 'parameters'))]
-"""Inputs of one SCF base run: code, pseudos, k-points, settings, and options; ``structure`` and the resolved
-``parameters`` are wired by the graph and ``parent_folder`` never applies."""
-
-NscfBundle = Annotated[Any, Forward(run_pw_base, exclude=('structure', 'parent_folder', 'parameters'))]
-"""Inputs of the NSCF base run: code, pseudos, k-points, settings, and options; ``structure``,
-``parent_folder``, and the resolved ``parameters`` are wired by the graph."""
-
 
 class PdosWindow(t.TypedDict):
     """Energy window of :func:`extract_nscf_window`: bands edges plus the Fermi energy, all in eV."""
@@ -103,7 +119,7 @@ class PdosWindow(t.TypedDict):
 
 
 class PdosStageOutputs(t.TypedDict):
-    """Outputs of :func:`pdos_stage`: the NSCF products, the DOS products, and the summary report."""
+    """Outputs of the NSCF-to-report stage: the NSCF products, the DOS products, and the summary report."""
 
     nscf_remote_folder: RemoteData
     nscf_output_parameters: Dict
@@ -124,7 +140,7 @@ class PdosStageOutputs(t.TypedDict):
 
 
 class PdosFromScratchOutputs(PdosStageOutputs):
-    """Outputs of :func:`pdos_from_scratch`: the stage outputs plus the SCF products."""
+    """Outputs of the from-scratch roots: the stage outputs plus the SCF products."""
 
     scf_remote_folder: RemoteData
     scf_output_parameters: Dict
@@ -132,7 +148,7 @@ class PdosFromScratchOutputs(PdosStageOutputs):
 
 
 class PdosFromParentOutputs(PdosStageOutputs):
-    """Outputs of :func:`pdos_from_parent`: exactly the stage outputs (no SCF ran here)."""
+    """Outputs of the from-parent roots: exactly the stage outputs (no SCF ran here)."""
 
 
 @task
@@ -215,7 +231,7 @@ def extract_nscf_window(output_parameters: Dict, output_band: BandsData | None =
     else:
         fermi = max(float(parsed['fermi_energy_up']), float(parsed['fermi_energy_down']))
     bands = output_band.get_array('bands')
-    return {'emin': float(bands.min()), 'emax': float(bands.max()), 'fermi': fermi}
+    return {'emin': float(bands.min()), 'emax': float(bands.max()), 'fermi': float(fermi)}
 
 
 def _resolve_window(
@@ -280,9 +296,8 @@ def resolve_post_windows(
 
     Mirrors ``PdosWorkChain._generate_dos_inputs``/``_generate_projwfc_inputs`` plus the ``emin``/``emax``/
     ``deltae`` equality launch validator: both mappings resolve from the same window, and a mismatch between them
-    fails here, before any submission. Returning both mappings threads a data edge into each calculation without
-    an explicit ordering edge. The returned mappings are fresh nodes: tasks cannot return their inputs, which
-    would close a provenance cycle.
+    fails here, before any submission. Returning both mappings threads a data edge into each calculation. The
+    returned mappings are fresh nodes: tasks cannot return their inputs, which would close a provenance cycle.
 
     :param dos_parameters: the requested ``dos.x`` parameters.
     :param projwfc_parameters: the requested ``projwfc.x`` parameters.
@@ -313,7 +328,7 @@ def summarize_pdos(
     :param dos_parameters: the resolved ``dos.x`` parameters holding the covered window.
     :param fermi: the Fermi energy in eV.
     :param stages: how many PW base runs the graph placed.
-    :param mode: ``'serial'`` or ``'parallel'``, following ``serial_clean``.
+    :param mode: ``'serial'`` or ``'parallel'``.
     :return: the summary mapping stored as a single ``Dict``.
     """
     window = dos_parameters.get_dict().get('DOS', {})
@@ -357,8 +372,7 @@ def sweep_stage(
     """Clean the stage remote folders when enabled, reporting whether anything was removed.
 
     Runs after the DOS and PROJWFC placements through its data dependencies, so it doubles as the
-    ``clean_workdir`` sweep of the legacy ``on_terminated`` step. Folders the serial sweeps already removed
-    report ``False`` for their share.
+    ``clean_workdir`` sweep. Folders the serial sweeps already removed report ``False`` for their share.
 
     :param nscf_folder: the NSCF remote folder, if any.
     :param dos_folder: the DOS remote folder, if any.
@@ -381,48 +395,52 @@ def sweep_stage(
 
 
 @graph
-def pdos_stage(
+def pdos_stage_parallel(
     structure: StructureData,
     parent_folder: RemoteData,
-    nscf: NscfBundle,
+    pw_code: Code,
+    pseudos: DataDict,
     nscf_parameters: Dict,
     dos_code: Code,
     dos_parameters: Dict,
     projwfc_code: Code,
     projwfc_parameters: Dict,
+    nscf_kpoints: KpointsData | None = None,
+    nscf_kpoints_distance: Float | None = None,
+    nscf_settings: Dict | None = None,
     dos_settings: Dict | None = None,
     projwfc_settings: Dict | None = None,
     parent_output_parameters: Dict | None = None,
     energy_range_vs_fermi: list | None = None,
     nbands_factor: float | None = None,
     stages: int = 1,
-    serial_clean: bool = False,
     clean_workdir: bool = False,
 ) -> PdosStageOutputs:
-    """Run NSCF then DOS and PROJWFC from one parent folder, then report.
+    """Run NSCF then DOS and PROJWFC concurrently from one parent folder, then report.
 
     The NSCF parameters resolve the band-count rule first; its bands window then feeds both post-processing
     parameter sets, which the matcher compares before either calculation submits. DOS and PROJWFC run as soon as
-    their inputs are ready, so the engine may run them concurrently: ``serial_clean`` only sweeps remote folders
-    promptly after each calculation and no longer serializes the pair (see the module limits). The final sweep
-    covers the ``clean_workdir`` parity.
+    their inputs are ready, so the engine may run them concurrently. The final sweep covers ``clean_workdir``.
 
     :param structure: the structure the NSCF run computes.
     :param parent_folder: the SCF (or caller-provided) remote folder the NSCF run restarts from.
-    :param nscf: the inputs of the NSCF base run, without ``structure``, ``parent_folder``, and ``parameters``.
+    :param pw_code: the ``quantumespresso.pw`` code of the NSCF run.
+    :param pseudos: mapping of kind names onto pseudopotential nodes.
     :param nscf_parameters: the requested ``pw.parameters`` of the NSCF run.
     :param dos_code: the ``quantumespresso.dos`` code.
     :param dos_parameters: the requested ``dos.x`` parameters.
     :param projwfc_code: the ``quantumespresso.projwfc`` code.
     :param projwfc_parameters: the requested ``projwfc.x`` parameters.
+    :param nscf_kpoints: explicit NSCF k-points, if any.
+    :param nscf_kpoints_distance: NSCF mesh density, if any.
+    :param nscf_settings: the NSCF ``pw.settings``, if any.
     :param dos_settings: the ``dos.x`` settings, if any.
     :param projwfc_settings: the ``projwfc.x`` settings, if any.
     :param parent_output_parameters: the ``output_parameters`` of the parent run, if any.
     :param energy_range_vs_fermi: the energy range around the Fermi level to cover, if any.
     :param nbands_factor: the multiplier of the parent band count, if any.
     :param stages: how many PW base runs the calling root placed.
-    :param serial_clean: whether to sweep each remote folder promptly after its calculation.
-    :param clean_workdir: whether to sweep the remaining remotes at the end.
+    :param clean_workdir: whether to sweep the remotes at the end.
     :return: the NSCF, DOS, and PROJWFC products plus the summary report.
     """
     resolved_nscf_parameters = resolve_nscf_parameters(
@@ -430,15 +448,14 @@ def pdos_stage(
         parent_parameters=parent_output_parameters,
         nbands_factor=nbands_factor,
     )
-    nscf_run = run_pw_base(
+    nscf_run = pw_base_graph(
+        code=pw_code,
         structure=structure,
+        pseudos=pseudos,
         parameters=resolved_nscf_parameters,
-        code=nscf.code,
-        pseudos=nscf.pseudos,
-        kpoints=nscf.kpoints,
-        kpoints_distance=nscf.kpoints_distance,
-        settings=nscf.settings,
-        options=nscf.options,
+        settings=nscf_settings,
+        kpoints=nscf_kpoints,
+        kpoints_distance=nscf_kpoints_distance,
         parent_folder=parent_folder,
     )
     window = extract_nscf_window(output_parameters=nscf_run.output_parameters, output_band=nscf_run.output_band)
@@ -462,8 +479,6 @@ def pdos_stage(
         parameters=matched.projwfc,
         parent_folder=nscf_run.remote_folder,
     )
-    dos_swept = sweep_remote(folder=dos_run.remote_folder, enabled=serial_clean)  # noqa: F841
-    projwfc_swept = sweep_remote(folder=projwfc_run.remote_folder, enabled=serial_clean)  # noqa: F841
     swept = sweep_stage(  # noqa: F841
         nscf_folder=nscf_run.remote_folder,
         dos_folder=dos_run.remote_folder,
@@ -475,7 +490,7 @@ def pdos_stage(
         dos_parameters=matched.dos,
         fermi=window.fermi,
         stages=stages,
-        mode='serial' if serial_clean else 'parallel',
+        mode='parallel',
     )
     return {
         'nscf_remote_folder': nscf_run.remote_folder,
@@ -498,80 +513,216 @@ def pdos_stage(
 
 
 @graph
-def pdos_from_scratch(
+def pdos_stage_serial(
     structure: StructureData,
-    scf: ScfBundle,
-    scf_parameters: Dict,
-    nscf: NscfBundle,
+    parent_folder: RemoteData,
+    pw_code: Code,
+    pseudos: DataDict,
     nscf_parameters: Dict,
     dos_code: Code,
     dos_parameters: Dict,
     projwfc_code: Code,
     projwfc_parameters: Dict,
+    nscf_kpoints: KpointsData | None = None,
+    nscf_kpoints_distance: Float | None = None,
+    nscf_settings: Dict | None = None,
     dos_settings: Dict | None = None,
     projwfc_settings: Dict | None = None,
+    parent_output_parameters: Dict | None = None,
     energy_range_vs_fermi: list | None = None,
     nbands_factor: float | None = None,
-    serial_clean: bool = False,
+    stages: int = 1,
     clean_workdir: bool = False,
-) -> PdosFromScratchOutputs:
-    """Compute total and partial densities of states, running SCF first.
+) -> PdosStageOutputs:
+    """Run NSCF then DOS, sweep DOS, then PROJWFC from one parent folder, then report.
 
-    Mirrors ``PdosWorkChain`` with the ``scf`` inputs given: the SCF base run feeds its remote folder and band
-    count into the shared stage. The SCF remote is swept once the stage is placed when ``serial_clean`` holds,
-    and again at the end when ``clean_workdir`` holds.
+    The unconditional ``after`` edge from the DOS sweep into PROJWFC serializes the
+    pair, matching the legacy ``serial_clean`` order DOS → cleanup → PROJWFC. The
+    DOS remote is swept promptly before PROJWFC submits; the final sweep covers
+    ``clean_workdir`` for the remaining remotes.
 
-    Scheduler options for the ``dos.x``/``projwfc.x`` placements ride under ``task_metadata`` keyed
-    ``'dos_calc'`` and ``'projwfc_calc'`` (the declaration names, stable across every graph); the base runs take theirs through the ``options`` field of each bundle.
-
-    :param structure: the structure to compute the DOS of.
-    :param scf: the inputs of the SCF base run, without ``structure``, ``parent_folder``, and ``parameters``.
-    :param scf_parameters: the requested ``pw.parameters`` of the SCF run.
-    :param nscf: the inputs of the NSCF base run, without ``structure``, ``parent_folder``, and ``parameters``.
+    :param structure: the structure the NSCF run computes.
+    :param parent_folder: the SCF (or caller-provided) remote folder the NSCF run restarts from.
+    :param pw_code: the ``quantumespresso.pw`` code of the NSCF run.
+    :param pseudos: mapping of kind names onto pseudopotential nodes.
     :param nscf_parameters: the requested ``pw.parameters`` of the NSCF run.
     :param dos_code: the ``quantumespresso.dos`` code.
     :param dos_parameters: the requested ``dos.x`` parameters.
     :param projwfc_code: the ``quantumespresso.projwfc`` code.
     :param projwfc_parameters: the requested ``projwfc.x`` parameters.
+    :param nscf_kpoints: explicit NSCF k-points, if any.
+    :param nscf_kpoints_distance: NSCF mesh density, if any.
+    :param nscf_settings: the NSCF ``pw.settings``, if any.
+    :param dos_settings: the ``dos.x`` settings, if any.
+    :param projwfc_settings: the ``projwfc.x`` settings, if any.
+    :param parent_output_parameters: the ``output_parameters`` of the parent run, if any.
+    :param energy_range_vs_fermi: the energy range around the Fermi level to cover, if any.
+    :param nbands_factor: the multiplier of the parent band count, if any.
+    :param stages: how many PW base runs the calling root placed.
+    :param clean_workdir: whether to sweep the remaining remotes at the end.
+    :return: the NSCF, DOS, and PROJWFC products plus the summary report.
+    """
+    resolved_nscf_parameters = resolve_nscf_parameters(
+        parameters=nscf_parameters,
+        parent_parameters=parent_output_parameters,
+        nbands_factor=nbands_factor,
+    )
+    nscf_run = pw_base_graph(
+        code=pw_code,
+        structure=structure,
+        pseudos=pseudos,
+        parameters=resolved_nscf_parameters,
+        settings=nscf_settings,
+        kpoints=nscf_kpoints,
+        kpoints_distance=nscf_kpoints_distance,
+        parent_folder=parent_folder,
+    )
+    window = extract_nscf_window(output_parameters=nscf_run.output_parameters, output_band=nscf_run.output_band)
+    matched = resolve_post_windows(
+        dos_parameters=dos_parameters,
+        projwfc_parameters=projwfc_parameters,
+        emin=window.emin,
+        emax=window.emax,
+        fermi=window.fermi,
+        energy_range_vs_fermi=energy_range_vs_fermi,
+    )
+    dos_run = dos_calc(
+        code=dos_code,
+        settings=dos_settings,
+        parameters=matched.dos,
+        parent_folder=nscf_run.remote_folder,
+    )
+    dos_swept = sweep_remote(folder=dos_run.remote_folder, enabled=True)
+    projwfc_run = projwfc_calc(
+        code=projwfc_code,
+        settings=projwfc_settings,
+        parameters=matched.projwfc,
+        parent_folder=nscf_run.remote_folder,
+        after=dos_swept,
+    )
+    projwfc_swept = sweep_remote(folder=projwfc_run.remote_folder, enabled=True, after=projwfc_run)
+    swept = sweep_stage(  # noqa: F841
+        nscf_folder=nscf_run.remote_folder,
+        dos_folder=dos_run.remote_folder,
+        projwfc_folder=projwfc_run.remote_folder,
+        enabled=clean_workdir,
+        after=projwfc_swept,
+    )
+    report = summarize_pdos(
+        output_parameters=nscf_run.output_parameters,
+        dos_parameters=matched.dos,
+        fermi=window.fermi,
+        stages=stages,
+        mode='serial',
+    )
+    return {
+        'nscf_remote_folder': nscf_run.remote_folder,
+        'nscf_output_parameters': nscf_run.output_parameters,
+        'nscf_output_band': nscf_run.output_band,
+        'dos_output_parameters': dos_run.output_parameters,
+        'dos_output_dos': dos_run.output_dos,
+        'projwfc_output_parameters': projwfc_run.output_parameters,
+        'projwfc_dos': projwfc_run.Dos,
+        'projwfc_ldos': projwfc_run.Ldos,
+        'projwfc_pdos': projwfc_run.Pdos,
+        'projwfc_projections': projwfc_run.projections,
+        'projwfc_projections_up': projwfc_run.projections_up,
+        'projwfc_projections_down': projwfc_run.projections_down,
+        'projwfc_bands': projwfc_run.bands,
+        'projwfc_bands_up': projwfc_run.bands_up,
+        'projwfc_bands_down': projwfc_run.bands_down,
+        'report': report,
+    }
+
+
+# Backwards-compatible aliases: the unqualified stage ran the parallel shape.
+pdos_stage = pdos_stage_parallel
+
+
+@graph
+def pdos_from_scratch_parallel(
+    structure: StructureData,
+    pw_code: Code,
+    pseudos: DataDict,
+    scf_parameters: Dict,
+    nscf_parameters: Dict,
+    dos_code: Code,
+    dos_parameters: Dict,
+    projwfc_code: Code,
+    projwfc_parameters: Dict,
+    scf_kpoints: KpointsData | None = None,
+    scf_kpoints_distance: Float | None = None,
+    nscf_kpoints: KpointsData | None = None,
+    nscf_kpoints_distance: Float | None = None,
+    scf_settings: Dict | None = None,
+    nscf_settings: Dict | None = None,
+    dos_settings: Dict | None = None,
+    projwfc_settings: Dict | None = None,
+    energy_range_vs_fermi: list | None = None,
+    nbands_factor: float | None = None,
+    clean_workdir: bool = False,
+) -> PdosFromScratchOutputs:
+    """Compute total and partial densities of states, running SCF first, DOS/PROJWFC concurrently.
+
+    The SCF base run feeds its remote folder and band count into the shared
+    parallel stage. The SCF remote is swept at the end only when
+    ``clean_workdir`` holds. Scheduler options ride at launch under
+    ``task_metadata`` (see the module docstring).
+
+    :param structure: the structure to compute the DOS of.
+    :param pw_code: the ``quantumespresso.pw`` code of the SCF and NSCF runs.
+    :param pseudos: mapping of kind names onto pseudopotential nodes.
+    :param scf_parameters: the requested ``pw.parameters`` of the SCF run.
+    :param nscf_parameters: the requested ``pw.parameters`` of the NSCF run.
+    :param dos_code: the ``quantumespresso.dos`` code.
+    :param dos_parameters: the requested ``dos.x`` parameters.
+    :param projwfc_code: the ``quantumespresso.projwfc`` code.
+    :param projwfc_parameters: the requested ``projwfc.x`` parameters.
+    :param scf_kpoints: explicit SCF k-points, if any.
+    :param scf_kpoints_distance: SCF mesh density, if any.
+    :param nscf_kpoints: explicit NSCF k-points, if any.
+    :param nscf_kpoints_distance: NSCF mesh density, if any.
+    :param scf_settings: the SCF ``pw.settings``, if any.
+    :param nscf_settings: the NSCF ``pw.settings``, if any.
     :param dos_settings: the ``dos.x`` settings, if any.
     :param projwfc_settings: the ``projwfc.x`` settings, if any.
     :param energy_range_vs_fermi: the energy range around the Fermi level to cover, if any.
     :param nbands_factor: the multiplier of the parent band count, if any.
-    :param serial_clean: whether to sweep each remote folder promptly after its calculation.
-    :param clean_workdir: whether to sweep the remaining remotes at the end.
+    :param clean_workdir: whether to sweep the remotes at the end.
     :return: the SCF products, the stage products, and the summary report.
     """
     checked_scf_parameters = require_scf_parameters(parameters=scf_parameters)
-    scf_run = run_pw_base(
+    scf_run = pw_base_graph(
+        code=pw_code,
         structure=structure,
+        pseudos=pseudos,
         parameters=checked_scf_parameters,
-        code=scf.code,
-        pseudos=scf.pseudos,
-        kpoints=scf.kpoints,
-        kpoints_distance=scf.kpoints_distance,
-        settings=scf.settings,
-        options=scf.options,
+        settings=scf_settings,
+        kpoints=scf_kpoints,
+        kpoints_distance=scf_kpoints_distance,
     )
-    stage = pdos_stage(
+    stage = pdos_stage_parallel(
         structure=structure,
         parent_folder=scf_run.remote_folder,
-        nscf=nscf,
+        pw_code=pw_code,
+        pseudos=pseudos,
         nscf_parameters=nscf_parameters,
         dos_code=dos_code,
         dos_parameters=dos_parameters,
         projwfc_code=projwfc_code,
         projwfc_parameters=projwfc_parameters,
+        nscf_kpoints=nscf_kpoints,
+        nscf_kpoints_distance=nscf_kpoints_distance,
+        nscf_settings=nscf_settings,
         dos_settings=dos_settings,
         projwfc_settings=projwfc_settings,
         parent_output_parameters=scf_run.output_parameters,
         energy_range_vs_fermi=energy_range_vs_fermi,
         nbands_factor=nbands_factor,
         stages=2,
-        serial_clean=serial_clean,
         clean_workdir=clean_workdir,
     )
-    scf_swept = sweep_remote(folder=scf_run.remote_folder, enabled=serial_clean, after=stage)
-    scf_final = sweep_remote(folder=scf_run.remote_folder, enabled=clean_workdir, after=scf_swept)  # noqa: F841
+    scf_final = sweep_remote(folder=scf_run.remote_folder, enabled=clean_workdir, after=stage)  # noqa: F841
     return {
         'scf_remote_folder': scf_run.remote_folder,
         'scf_output_parameters': scf_run.output_parameters,
@@ -596,65 +747,184 @@ def pdos_from_scratch(
 
 
 @graph
-def pdos_from_parent(
+def pdos_from_scratch_serial(
     structure: StructureData,
-    parent_folder: RemoteData,
-    nscf: NscfBundle,
+    pw_code: Code,
+    pseudos: DataDict,
+    scf_parameters: Dict,
     nscf_parameters: Dict,
     dos_code: Code,
     dos_parameters: Dict,
     projwfc_code: Code,
     projwfc_parameters: Dict,
+    scf_kpoints: KpointsData | None = None,
+    scf_kpoints_distance: Float | None = None,
+    nscf_kpoints: KpointsData | None = None,
+    nscf_kpoints_distance: Float | None = None,
+    scf_settings: Dict | None = None,
+    nscf_settings: Dict | None = None,
     dos_settings: Dict | None = None,
     projwfc_settings: Dict | None = None,
-    parent_output_parameters: Dict | None = None,
     energy_range_vs_fermi: list | None = None,
     nbands_factor: float | None = None,
-    serial_clean: bool = False,
     clean_workdir: bool = False,
-) -> PdosFromParentOutputs:
-    """Compute total and partial densities of states, restarting NSCF from a caller-provided folder.
+) -> PdosFromScratchOutputs:
+    """Compute total and partial densities of states, running SCF first, DOS before PROJWFC.
 
-    Mirrors ``PdosWorkChain`` without the ``scf`` inputs (where the legacy chain reads
-    ``nscf.pw.parent_folder``): the caller hands over the NSCF parent folder directly. ``parent_output_parameters``
-    only matters with ``nbands_factor``, mirroring the legacy read of the parent creator outputs.
-
-    Scheduler options for the ``dos.x``/``projwfc.x`` placements ride under ``task_metadata`` keyed
-    ``'dos_calc'`` and ``'projwfc_calc'`` (the declaration names, stable across every graph); the base run takes its through the ``options`` field of the ``nscf`` bundle.
+    Mirrors the legacy ``serial_clean`` order: SCF → NSCF → DOS → sweep DOS →
+    PROJWFC. The SCF remote is swept after the stage (it outlives NSCF as its
+    parent); the DOS remote is swept inside the serial stage before PROJWFC
+    submits. The final sweep covers ``clean_workdir``.
 
     :param structure: the structure to compute the DOS of.
-    :param parent_folder: the remote folder the NSCF run restarts from.
-    :param nscf: the inputs of the NSCF base run, without ``structure``, ``parent_folder``, and ``parameters``.
+    :param pw_code: the ``quantumespresso.pw`` code of the SCF and NSCF runs.
+    :param pseudos: mapping of kind names onto pseudopotential nodes.
+    :param scf_parameters: the requested ``pw.parameters`` of the SCF run.
     :param nscf_parameters: the requested ``pw.parameters`` of the NSCF run.
     :param dos_code: the ``quantumespresso.dos`` code.
     :param dos_parameters: the requested ``dos.x`` parameters.
     :param projwfc_code: the ``quantumespresso.projwfc`` code.
     :param projwfc_parameters: the requested ``projwfc.x`` parameters.
+    :param scf_kpoints: explicit SCF k-points, if any.
+    :param scf_kpoints_distance: SCF mesh density, if any.
+    :param nscf_kpoints: explicit NSCF k-points, if any.
+    :param nscf_kpoints_distance: NSCF mesh density, if any.
+    :param scf_settings: the SCF ``pw.settings``, if any.
+    :param nscf_settings: the NSCF ``pw.settings``, if any.
     :param dos_settings: the ``dos.x`` settings, if any.
     :param projwfc_settings: the ``projwfc.x`` settings, if any.
-    :param parent_output_parameters: the ``output_parameters`` of the parent run, if any.
     :param energy_range_vs_fermi: the energy range around the Fermi level to cover, if any.
     :param nbands_factor: the multiplier of the parent band count, if any.
-    :param serial_clean: whether to sweep each remote folder promptly after its calculation.
     :param clean_workdir: whether to sweep the remaining remotes at the end.
-    :return: the stage products and the summary report.
+    :return: the SCF products, the stage products, and the summary report.
     """
-    stage = pdos_stage(
+    checked_scf_parameters = require_scf_parameters(parameters=scf_parameters)
+    scf_run = pw_base_graph(
+        code=pw_code,
         structure=structure,
-        parent_folder=parent_folder,
-        nscf=nscf,
+        pseudos=pseudos,
+        parameters=checked_scf_parameters,
+        settings=scf_settings,
+        kpoints=scf_kpoints,
+        kpoints_distance=scf_kpoints_distance,
+    )
+    stage = pdos_stage_serial(
+        structure=structure,
+        parent_folder=scf_run.remote_folder,
+        pw_code=pw_code,
+        pseudos=pseudos,
         nscf_parameters=nscf_parameters,
         dos_code=dos_code,
         dos_parameters=dos_parameters,
         projwfc_code=projwfc_code,
         projwfc_parameters=projwfc_parameters,
+        nscf_kpoints=nscf_kpoints,
+        nscf_kpoints_distance=nscf_kpoints_distance,
+        nscf_settings=nscf_settings,
+        dos_settings=dos_settings,
+        projwfc_settings=projwfc_settings,
+        parent_output_parameters=scf_run.output_parameters,
+        energy_range_vs_fermi=energy_range_vs_fermi,
+        nbands_factor=nbands_factor,
+        stages=2,
+        clean_workdir=clean_workdir,
+    )
+    scf_swept = sweep_remote(folder=scf_run.remote_folder, enabled=True, after=stage)
+    scf_final = sweep_remote(folder=scf_run.remote_folder, enabled=clean_workdir, after=scf_swept)  # noqa: F841
+    return {
+        'scf_remote_folder': scf_run.remote_folder,
+        'scf_output_parameters': scf_run.output_parameters,
+        'scf_output_band': scf_run.output_band,
+        'nscf_remote_folder': stage.nscf_remote_folder,
+        'nscf_output_parameters': stage.nscf_output_parameters,
+        'nscf_output_band': stage.nscf_output_band,
+        'dos_output_parameters': stage.dos_output_parameters,
+        'dos_output_dos': stage.dos_output_dos,
+        'projwfc_output_parameters': stage.projwfc_output_parameters,
+        'projwfc_dos': stage.projwfc_dos,
+        'projwfc_ldos': stage.projwfc_ldos,
+        'projwfc_pdos': stage.projwfc_pdos,
+        'projwfc_projections': stage.projwfc_projections,
+        'projwfc_projections_up': stage.projwfc_projections_up,
+        'projwfc_projections_down': stage.projwfc_projections_down,
+        'projwfc_bands': stage.projwfc_bands,
+        'projwfc_bands_up': stage.projwfc_bands_up,
+        'projwfc_bands_down': stage.projwfc_bands_down,
+        'report': stage.report,
+    }
+
+
+# Backwards-compatible alias: the unqualified from-scratch root ran the parallel shape.
+pdos_from_scratch = pdos_from_scratch_parallel
+
+
+@graph
+def pdos_from_parent_parallel(
+    structure: StructureData,
+    parent_folder: RemoteData,
+    pw_code: Code,
+    pseudos: DataDict,
+    nscf_parameters: Dict,
+    dos_code: Code,
+    dos_parameters: Dict,
+    projwfc_code: Code,
+    projwfc_parameters: Dict,
+    nscf_kpoints: KpointsData | None = None,
+    nscf_kpoints_distance: Float | None = None,
+    nscf_settings: Dict | None = None,
+    dos_settings: Dict | None = None,
+    projwfc_settings: Dict | None = None,
+    parent_output_parameters: Dict | None = None,
+    energy_range_vs_fermi: list | None = None,
+    nbands_factor: float | None = None,
+    clean_workdir: bool = False,
+) -> PdosFromParentOutputs:
+    """Compute total and partial densities of states from a caller-provided folder, concurrently.
+
+    Mirrors the legacy chain without the ``scf`` inputs: the caller hands over
+    the NSCF parent folder directly. ``parent_output_parameters`` only matters
+    with ``nbands_factor``. Scheduler options ride at launch under
+    ``task_metadata`` (see the module docstring).
+
+    :param structure: the structure to compute the DOS of.
+    :param parent_folder: the remote folder the NSCF run restarts from.
+    :param pw_code: the ``quantumespresso.pw`` code of the NSCF run.
+    :param pseudos: mapping of kind names onto pseudopotential nodes.
+    :param nscf_parameters: the requested ``pw.parameters`` of the NSCF run.
+    :param dos_code: the ``quantumespresso.dos`` code.
+    :param dos_parameters: the requested ``dos.x`` parameters.
+    :param projwfc_code: the ``quantumespresso.projwfc`` code.
+    :param projwfc_parameters: the requested ``projwfc.x`` parameters.
+    :param nscf_kpoints: explicit NSCF k-points, if any.
+    :param nscf_kpoints_distance: NSCF mesh density, if any.
+    :param nscf_settings: the NSCF ``pw.settings``, if any.
+    :param dos_settings: the ``dos.x`` settings, if any.
+    :param projwfc_settings: the ``projwfc.x`` settings, if any.
+    :param parent_output_parameters: the ``output_parameters`` of the parent run, if any.
+    :param energy_range_vs_fermi: the energy range around the Fermi level to cover, if any.
+    :param nbands_factor: the multiplier of the parent band count, if any.
+    :param clean_workdir: whether to sweep the remotes at the end.
+    :return: the stage products and the summary report.
+    """
+    stage = pdos_stage_parallel(
+        structure=structure,
+        parent_folder=parent_folder,
+        pw_code=pw_code,
+        pseudos=pseudos,
+        nscf_parameters=nscf_parameters,
+        dos_code=dos_code,
+        dos_parameters=dos_parameters,
+        projwfc_code=projwfc_code,
+        projwfc_parameters=projwfc_parameters,
+        nscf_kpoints=nscf_kpoints,
+        nscf_kpoints_distance=nscf_kpoints_distance,
+        nscf_settings=nscf_settings,
         dos_settings=dos_settings,
         projwfc_settings=projwfc_settings,
         parent_output_parameters=parent_output_parameters,
         energy_range_vs_fermi=energy_range_vs_fermi,
         nbands_factor=nbands_factor,
         stages=1,
-        serial_clean=serial_clean,
         clean_workdir=clean_workdir,
     )
     return {
@@ -677,12 +947,92 @@ def pdos_from_parent(
     }
 
 
-def get_protocol_filepath() -> t.Any:
-    """Return the ``pathlib.Path`` to the legacy ``pdos.yaml`` protocol file.
+@graph
+def pdos_from_parent_serial(
+    structure: StructureData,
+    parent_folder: RemoteData,
+    pw_code: Code,
+    pseudos: DataDict,
+    nscf_parameters: Dict,
+    dos_code: Code,
+    dos_parameters: Dict,
+    projwfc_code: Code,
+    projwfc_parameters: Dict,
+    nscf_kpoints: KpointsData | None = None,
+    nscf_kpoints_distance: Float | None = None,
+    nscf_settings: Dict | None = None,
+    dos_settings: Dict | None = None,
+    projwfc_settings: Dict | None = None,
+    parent_output_parameters: Dict | None = None,
+    energy_range_vs_fermi: list | None = None,
+    nbands_factor: float | None = None,
+    clean_workdir: bool = False,
+) -> PdosFromParentOutputs:
+    """Compute total and partial densities of states from a caller-provided folder, DOS before PROJWFC.
 
-    The graph takes explicit inputs and does not consume protocol presets itself; this helper only exposes the
-    legacy file location for tooling that still reads it.
+    The serial stage orders DOS → sweep → PROJWFC with an unconditional
+    ``after`` edge, matching the legacy ``serial_clean`` order.
+
+    :param structure: the structure to compute the DOS of.
+    :param parent_folder: the remote folder the NSCF run restarts from.
+    :param pw_code: the ``quantumespresso.pw`` code of the NSCF run.
+    :param pseudos: mapping of kind names onto pseudopotential nodes.
+    :param nscf_parameters: the requested ``pw.parameters`` of the NSCF run.
+    :param dos_code: the ``quantumespresso.dos`` code.
+    :param dos_parameters: the requested ``dos.x`` parameters.
+    :param projwfc_code: the ``quantumespresso.projwfc`` code.
+    :param projwfc_parameters: the requested ``projwfc.x`` parameters.
+    :param nscf_kpoints: explicit NSCF k-points, if any.
+    :param nscf_kpoints_distance: NSCF mesh density, if any.
+    :param nscf_settings: the NSCF ``pw.settings``, if any.
+    :param dos_settings: the ``dos.x`` settings, if any.
+    :param projwfc_settings: the ``projwfc.x`` settings, if any.
+    :param parent_output_parameters: the ``output_parameters`` of the parent run, if any.
+    :param energy_range_vs_fermi: the energy range around the Fermi level to cover, if any.
+    :param nbands_factor: the multiplier of the parent band count, if any.
+    :param clean_workdir: whether to sweep the remaining remotes at the end.
+    :return: the stage products and the summary report.
     """
-    from aiida_quantumespresso.workflows.pdos import PdosWorkChain
+    stage = pdos_stage_serial(
+        structure=structure,
+        parent_folder=parent_folder,
+        pw_code=pw_code,
+        pseudos=pseudos,
+        nscf_parameters=nscf_parameters,
+        dos_code=dos_code,
+        dos_parameters=dos_parameters,
+        projwfc_code=projwfc_code,
+        projwfc_parameters=projwfc_parameters,
+        nscf_kpoints=nscf_kpoints,
+        nscf_kpoints_distance=nscf_kpoints_distance,
+        nscf_settings=nscf_settings,
+        dos_settings=dos_settings,
+        projwfc_settings=projwfc_settings,
+        parent_output_parameters=parent_output_parameters,
+        energy_range_vs_fermi=energy_range_vs_fermi,
+        nbands_factor=nbands_factor,
+        stages=1,
+        clean_workdir=clean_workdir,
+    )
+    return {
+        'nscf_remote_folder': stage.nscf_remote_folder,
+        'nscf_output_parameters': stage.nscf_output_parameters,
+        'nscf_output_band': stage.nscf_output_band,
+        'dos_output_parameters': stage.dos_output_parameters,
+        'dos_output_dos': stage.dos_output_dos,
+        'projwfc_output_parameters': stage.projwfc_output_parameters,
+        'projwfc_dos': stage.projwfc_dos,
+        'projwfc_ldos': stage.projwfc_ldos,
+        'projwfc_pdos': stage.projwfc_pdos,
+        'projwfc_projections': stage.projwfc_projections,
+        'projwfc_projections_up': stage.projwfc_projections_up,
+        'projwfc_projections_down': stage.projwfc_projections_down,
+        'projwfc_bands': stage.projwfc_bands,
+        'projwfc_bands_up': stage.projwfc_bands_up,
+        'projwfc_bands_down': stage.projwfc_bands_down,
+        'report': stage.report,
+    }
 
-    return PdosWorkChain.get_protocol_filepath()
+
+# Backwards-compatible alias: the unqualified from-parent root ran the parallel shape.
+pdos_from_parent = pdos_from_parent_parallel
