@@ -51,7 +51,8 @@ jobs:
                 print('Testing graph API from', direct['vcs_info']['commit_id'])
                 EOF
         -   name: Graph tests (must not skip)
-            run: uv run --no-project pytest tests/graphs -v --strict-markers -o 'markers=presto: SQLite/ZeroMQ test'
+            run: |
+                uv run --no-project pytest tests/graphs -v --strict-markers -o 'markers=presto: SQLite/ZeroMQ test'
         # Run even when graph tests fail so compatibility regressions are visible.
         -   name: Legacy workflow regression suite against experimental core
             if: always()
