@@ -2,13 +2,13 @@
 
 import numpy as np
 import pytest
+from aiida_quantumespresso.calculations.helpers import pw_input_helper
+
 from aiida import engine, orm, plugins
 from aiida.common import LinkType
+from aiida.engine import ProcessState
 from aiida.engine.utils import instantiate_process
 from aiida.manage.manager import get_manager
-from plumpy import ProcessState
-
-from aiida_quantumespresso.calculations.helpers import pw_input_helper
 
 
 def instantiate_process_builder(builder):

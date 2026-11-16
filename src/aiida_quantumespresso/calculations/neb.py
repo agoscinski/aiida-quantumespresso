@@ -86,8 +86,18 @@ class NebCalculation(CalcJob):
             required=False,
             help='An optional working directory of a previously completed calculation to restart from.',
         )
-        # We reuse some inputs from PwCalculation to construct the PW-specific parts of the input files
-        spec.expose_inputs(PwCalculation, namespace='pw', include=('parameters', 'pseudos', 'kpoints', 'vdw_table'))
+        # We reuse some inputs from PwCalculation to construct the PW-specific parts of the input files.
+        # The exposed `pw.pseudos` inherits whatever contract `PwCalculation` declares: the static `DataDict`
+        # input on ``aiida-core`` 3 or the legacy dynamic namespace on 2.x. On core 3 the `pw` namespace itself
+        # must stay static: `expose_inputs` absorbs the source root's `valid_type`, whose setter would flip the
+        # new namespace dynamic, and graph tasks reject dynamic namespaces. The legacy branch is left untouched.
+        namespace_options = {'valid_type': None, 'dynamic': False} if hasattr(orm, 'DataDict') else {}
+        spec.expose_inputs(
+            PwCalculation,
+            namespace='pw',
+            include=('parameters', 'pseudos', 'kpoints', 'vdw_table'),
+            namespace_options=namespace_options,
+        )
 
         spec.inputs.validator = cls.validate_inputs
 

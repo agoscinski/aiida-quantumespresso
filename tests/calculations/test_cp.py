@@ -1,6 +1,7 @@
 """Tests for the `CpCalculation` class."""
 
 import pytest
+from aiida import orm
 from aiida.common import datastructures
 
 
@@ -41,7 +42,13 @@ def test_cp_autopilot(fixture_sandbox, generate_calc_job, generate_inputs_cp, fi
     # Check the attributes of the returned `CalcInfo`
     assert isinstance(calc_info, datastructures.CalcInfo)
     assert sorted(calc_info.codes_info[0].cmdline_params) == sorted(cmdline_params)
-    assert sorted(calc_info.local_copy_list) == sorted(local_copy_list)
+    if hasattr(orm, 'DataDict'):
+        # The static `pseudos` container stages owned copies with fresh UUIDs; only staged paths stay stable.
+        assert [(filename, dest) for _, filename, dest in calc_info.local_copy_list] == [
+            (filename, dest) for _, filename, dest in local_copy_list
+        ]
+    else:
+        assert sorted(calc_info.local_copy_list) == sorted(local_copy_list)
     assert sorted(calc_info.retrieve_list) == sorted(retrieve_list)
     assert sorted(calc_info.retrieve_temporary_list) == sorted(retrieve_temporary_list)
     assert sorted(calc_info.remote_symlink_list) == sorted([])

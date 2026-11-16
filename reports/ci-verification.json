@@ -1,0 +1,214 @@
+{
+  "feature_commit": "062b26173b30ae29714dd6c2f63f1a6d4a5b839f",
+  "core_revision": "955f04745d114bf4c51b219de869e1bab14b7e64",
+  "tested_qe_revision": "5ab364a95d4da6fc4baed7994a8558ac39b4f5ad",
+  "source": "Public GitHub Actions REST API job/step results; no downloaded failure-log transcript",
+  "local": {
+    "core_graphs_presto": {
+      "passed": 1021
+    },
+    "metadata_focused": {
+      "passed": 25
+    },
+    "qe_graphs": {
+      "passed": 193
+    },
+    "qe_legacy_workflows": {
+      "failed": 47,
+      "passed": 104,
+      "skipped": 1,
+      "errors": 44
+    }
+  },
+  "runs": [
+    {
+      "repository": "agoscinski/aiida-core",
+      "id": 43964641758,
+      "jobs": [
+        {
+          "name": "test-pytest-fixtures",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/agoscinski/aiida-core/actions/runs/43964641758/job/133640734618"
+        },
+        {
+          "name": "test minimum reqs (3.10, sqlite)",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/agoscinski/aiida-core/actions/runs/43964641758/job/133640734979"
+        },
+        {
+          "name": "tests (3.14, psql, rmq)",
+          "status": "in_progress",
+          "conclusion": null,
+          "url": "https://github.com/agoscinski/aiida-core/actions/runs/43964641758/job/133640735002"
+        },
+        {
+          "name": "tests (3.10, psql, rmq)",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/agoscinski/aiida-core/actions/runs/43964641758/job/133640735145"
+        },
+        {
+          "name": "tests-presto",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/agoscinski/aiida-core/actions/runs/43964641758/job/133640735244"
+        },
+        {
+          "name": "tests (3.10, psql, zmq)",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/agoscinski/aiida-core/actions/runs/43964641758/job/133640735250"
+        },
+        {
+          "name": "verdi",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/agoscinski/aiida-core/actions/runs/43964641758/job/133640735452"
+        },
+        {
+          "name": "tests (3.14, psql, zmq)",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/agoscinski/aiida-core/actions/runs/43964641758/job/133640735462"
+        }
+      ]
+    },
+    {
+      "repository": "agoscinski/aiida-core",
+      "id": 43964641937,
+      "name": "pre-commit",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "repository": "agoscinski/aiida-core",
+      "id": 43964642118,
+      "name": "docs-build",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "repository": "agoscinski/aiida-quantumespresso",
+      "id": 43967237944,
+      "jobs": [
+        {
+          "name": "pre-commit",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43967237944/job/133649768618"
+        },
+        {
+          "name": "tests (3.10)",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43967237944/job/133649769080"
+        },
+        {
+          "name": "tests (3.13)",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43967237944/job/133649769111"
+        },
+        {
+          "name": "tests (3.14)",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43967237944/job/133649769141"
+        },
+        {
+          "name": "tests (3.11)",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43967237944/job/133649769177"
+        },
+        {
+          "name": "tests (3.12)",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43967237944/job/133649769219"
+        }
+      ]
+    },
+    {
+      "repository": "agoscinski/aiida-quantumespresso",
+      "id": 43967237948,
+      "jobs": [
+        {
+          "name": "graphs",
+          "status": "completed",
+          "conclusion": "failure",
+          "url": "https://github.com/agoscinski/aiida-quantumespresso/actions/runs/43967237948/job/133649769052",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Initialize containers",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run astral-sh/setup-uv@v6",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Install QE and test dependencies",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Install pinned experimental core",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Verify core revision and graph API",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Graph tests (must not skip)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Legacy workflow regression suite against experimental core",
+              "status": "completed",
+              "conclusion": "failure"
+            },
+            {
+              "name": "Post Run astral-sh/setup-uv@v6",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Stop containers",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
