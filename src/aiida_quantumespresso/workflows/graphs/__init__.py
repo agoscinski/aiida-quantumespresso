@@ -13,6 +13,9 @@ from aiida_quantumespresso.workflows.graphs.base import (
     pw_base_graph,
     q2r_base_graph,
 )
+from aiida_quantumespresso.workflows.graphs.cleanup import cleanup_graph_workdirs
+from aiida_quantumespresso.workflows.graphs.ph import get_ph_recover_chain, merge_ph_graph_outputs
+from aiida_quantumespresso.workflows.graphs.protocols import get_inputs_from_protocol
 from aiida_quantumespresso.workflows.graphs.pdos import (
     pdos_from_parent,
     pdos_from_parent_parallel,
@@ -25,7 +28,11 @@ from aiida_quantumespresso.workflows.graphs.pw import pw_bands_graph, pw_relax_g
 
 __all__ = (
     'bands_base_graph',
+    'cleanup_graph_workdirs',
+    'get_inputs_from_protocol',
+    'get_ph_recover_chain',
     'matdyn_base_graph',
+    'merge_ph_graph_outputs',
     'neb_base_graph',
     'pdos_from_parent',
     'pdos_from_parent_parallel',

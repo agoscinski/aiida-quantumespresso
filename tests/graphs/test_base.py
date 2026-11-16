@@ -623,7 +623,7 @@ def test_pw_base_graph_diag_recovers_real_wiring(monkeypatch, aiida_code_install
     stub failure is driven by the carried ``parameters`` (not a counter), so the real
     ``pw_base_graph`` retry loop drives it exactly as it would ``PwCalculation``.
     """
-    _substitute(monkeypatch, DiagPwCalc, 'pw_calc', {'pseudos': orm.DataDict}, PwErrors)
+    _substitute(monkeypatch, DiagPwCalc, 'pw_calc', {'pseudos': orm.DataDict, 'monitors': orm.DataDict}, PwErrors)
     code = aiida_code_installed(label='test.pw-diag', default_calc_job_plugin='quantumespresso.pw')
     outputs, node = run_get_node(
         base.pw_base_graph,
@@ -649,7 +649,7 @@ def test_pw_base_graph_diag_recovers_real_wiring(monkeypatch, aiida_code_install
 @pytest.mark.usefixtures('aiida_profile_clean')
 def test_pw_base_graph_success_real_wiring(monkeypatch, aiida_code_installed) -> None:
     """A first-try success returns the stub outputs plus a one-attempt report."""
-    _substitute(monkeypatch, SuccessPwCalc, 'pw_calc', {'pseudos': orm.DataDict}, PwErrors)
+    _substitute(monkeypatch, SuccessPwCalc, 'pw_calc', {'pseudos': orm.DataDict, 'monitors': orm.DataDict}, PwErrors)
     code = aiida_code_installed(label='test.pw-success', default_calc_job_plugin='quantumespresso.pw')
     outputs, node = run_get_node(
         base.pw_base_graph,
@@ -671,7 +671,7 @@ def test_pw_base_graph_success_real_wiring(monkeypatch, aiida_code_installed) ->
 @pytest.mark.usefixtures('aiida_profile_clean')
 def test_pw_base_graph_walltime_recovers_real_wiring(monkeypatch, aiida_code_installed) -> None:
     """A walltime restart rebinds the failed run's folder and recovers."""
-    _substitute(monkeypatch, WalltimePwCalc, 'pw_calc', {'pseudos': orm.DataDict}, PwErrors)
+    _substitute(monkeypatch, WalltimePwCalc, 'pw_calc', {'pseudos': orm.DataDict, 'monitors': orm.DataDict}, PwErrors)
     code = aiida_code_installed(label='test.pw-walltime', default_calc_job_plugin='quantumespresso.pw')
     outputs, node = run_get_node(
         base.pw_base_graph,
@@ -696,7 +696,7 @@ def test_pw_base_graph_walltime_recovers_real_wiring(monkeypatch, aiida_code_ins
 @pytest.mark.usefixtures('aiida_profile_clean')
 def test_pw_base_graph_ionic_recovers_real_wiring(monkeypatch, aiida_code_installed) -> None:
     """An ionic restart rebinds the output structure and recovers from scratch."""
-    _substitute(monkeypatch, IonicPwCalc, 'pw_calc', {'pseudos': orm.DataDict}, PwErrors)
+    _substitute(monkeypatch, IonicPwCalc, 'pw_calc', {'pseudos': orm.DataDict, 'monitors': orm.DataDict}, PwErrors)
     code = aiida_code_installed(label='test.pw-ionic', default_calc_job_plugin='quantumespresso.pw')
     outputs, node = run_get_node(
         base.pw_base_graph,
@@ -717,7 +717,9 @@ def test_pw_base_graph_ionic_recovers_real_wiring(monkeypatch, aiida_code_instal
 @pytest.mark.usefixtures('aiida_profile_clean')
 def test_pw_base_graph_absent_structure_fails_loudly_real_wiring(monkeypatch, aiida_code_installed) -> None:
     """A walltime restart without a stored structure aborts at the guard, not degraded."""
-    _substitute(monkeypatch, BareWalltimePwCalc, 'pw_calc', {'pseudos': orm.DataDict}, PwErrors)
+    _substitute(
+        monkeypatch, BareWalltimePwCalc, 'pw_calc', {'pseudos': orm.DataDict, 'monitors': orm.DataDict}, PwErrors
+    )
     code = aiida_code_installed(label='test.pw-bare', default_calc_job_plugin='quantumespresso.pw')
     outputs, node = run_get_node(
         base.pw_base_graph,
@@ -741,7 +743,7 @@ def test_pw_base_graph_absent_structure_fails_loudly_real_wiring(monkeypatch, ai
 @pytest.mark.usefixtures('aiida_profile_clean')
 def test_pw_base_graph_exhausts_budget_real_wiring(monkeypatch, aiida_code_installed) -> None:
     """Persistent parameter-only failures exhaust the budget and fail loudly."""
-    _substitute(monkeypatch, DiagPwCalc, 'pw_calc', {'pseudos': orm.DataDict}, PwErrors)
+    _substitute(monkeypatch, DiagPwCalc, 'pw_calc', {'pseudos': orm.DataDict, 'monitors': orm.DataDict}, PwErrors)
     code = aiida_code_installed(label='test.pw-exhaust', default_calc_job_plugin='quantumespresso.pw')
     outputs, node = run_get_node(
         base.pw_base_graph,
@@ -762,7 +764,7 @@ def test_pw_base_graph_exhausts_budget_real_wiring(monkeypatch, aiida_code_insta
 @pytest.mark.usefixtures('aiida_profile_clean')
 def test_pw_base_graph_dict_parameters_and_parent_folder(monkeypatch, aiida_code_installed) -> None:
     """``orm.Dict`` parameters and an explicit parent folder wire through untouched."""
-    _substitute(monkeypatch, SuccessPwCalc, 'pw_calc', {'pseudos': orm.DataDict}, PwErrors)
+    _substitute(monkeypatch, SuccessPwCalc, 'pw_calc', {'pseudos': orm.DataDict, 'monitors': orm.DataDict}, PwErrors)
     code = aiida_code_installed(label='test.pw-dictparent', default_calc_job_plugin='quantumespresso.pw')
     parent = _remote_folder()
     outputs, node = run_get_node(
@@ -811,8 +813,8 @@ def test_neb_base_graph_diag_recovers_real_wiring(monkeypatch, aiida_code_instal
 def test_error_enums_cover_documented_statuses() -> None:
     """The error enums map the statuses the handlers claim, without the loud ones."""
     pw_statuses = {member.value.status for member in PwErrors}
-    assert {400, 410, 462, 500, 542} <= pw_statuses
-    assert 150 not in pw_statuses  # message-gated monitor stop stays unhandled
+    assert {150, 400, 410, 462, 500, 542} <= pw_statuses
+    # 150 is claimed only on a machine-readable `monitor_diagnostics` reason, never on the exit message.
     assert 501 not in pw_statuses  # considered-finished would lose its outputs
     assert 710 not in pw_statuses
     ph_statuses = {member.value.status for member in PhErrors}
@@ -836,7 +838,9 @@ def test_subgraph_contract() -> None:
         'kpoints_distance',
         'kpoints_force_parity',
         'parent_folder',
+        'monitors',
         'max_iterations',
     ]
     assert signature.parameters['pseudos'].annotation is orm.DataDict
+    assert signature.parameters['monitors'].annotation == orm.DataDict | None
     assert signature.parameters['parent_folder'].annotation == orm.RemoteData | None

@@ -232,7 +232,7 @@ def _patch_nested(monkeypatch, pw_stub=None, dos_stub=None, projwfc_stub=None) -
     if pw_stub is not None:
         from aiida.orm import DataDict as _DataDict
 
-        shaped = task(pw_stub, inputs={'pseudos': _DataDict}, errors=PwErrors)
+        shaped = task(pw_stub, inputs={'pseudos': _DataDict, 'monitors': _DataDict}, errors=PwErrors)
         monkeypatch.setattr(base_module, 'pw_calc', shaped)
     if dos_stub is not None:
         monkeypatch.setattr(pdos_module, 'dos_calc', task(dos_stub))
