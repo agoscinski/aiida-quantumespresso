@@ -1,5 +1,28 @@
 # Native QE graphs — third refinement and validation
 
+## Follow-up: static pseudopotential inputs only
+
+PW/CP now declare `pseudos` as a static `DataDict` input on core 3; NEB inherits
+that port under its static `pw` namespace. Graphs no longer declare or expand a
+pseudopotential namespace. Each CalcJob links to the owning container instead of
+individual pseudo members. Plain mapping launches remain accepted through a
+serializer. Homogeneous legacy or aiida-pseudo UPF members are supported; mixing
+those concrete node types in one container is not. The core-2.x namespace remains
+for stable compatibility.
+
+**CalcJob monitor inputs, runtime, and provenance are unchanged.** Any static
+monitor experiment from this follow-up was reverted. Monitor forwarding still
+uses the existing adapter. Outputs were not changed.
+
+Focused post-revert validation: **38 core tests and 99 QE tests passed**; both
+repositories' relevant pre-commit hooks passed. Supporting core commit
+`104f5b7bf1959cb5e98154e3137d55f691fc7832` fixes builder `_update` for mapping-valued
+leaf ports and file staging of unstored owned members. The new CI pin requires
+that core commit to be pushed before running remote CI. These follow-up changes
+are committed locally, not pushed; the CI results below belong to the prior round.
+
+---
+
 ## Verdict
 
 **Native, without WorkChains, but not feature-complete or legacy-API compatible.**

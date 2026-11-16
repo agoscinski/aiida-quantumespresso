@@ -74,7 +74,8 @@ def serialize_builder():
     """
 
     def serialize_data(data):
-        from aiida.orm import AbstractCode, BaseType, Data, Dict, KpointsData, List, RemoteData, SinglefileData
+        from aiida import orm
+        from aiida.orm import BaseType, Data, Dict, KpointsData, List, RemoteData, SinglefileData
         from aiida.plugins import DataFactory
 
         StructureData = DataFactory('core.structure')
@@ -86,8 +87,11 @@ def serialize_builder():
         if isinstance(data, BaseType):
             return data.value
 
-        if isinstance(data, AbstractCode):
+        if isinstance(data, getattr(orm, 'AbstractCode', orm.Code)):
             return data.label
+
+        if hasattr(orm, 'DataDict') and isinstance(data, orm.DataDict):
+            return {key: serialize_data(value) for key, value in data.items()}
 
         if isinstance(data, Dict):
             return data.get_dict()

@@ -37,7 +37,13 @@ def test_pw_default(fixture_sandbox, generate_calc_job, generate_inputs_pw, file
     assert isinstance(calc_info, datastructures.CalcInfo)
     assert isinstance(calc_info.codes_info[0], datastructures.CodeInfo)
     assert sorted(calc_info.codes_info[0].cmdline_params) == cmdline_params
-    assert sorted(calc_info.local_copy_list) == sorted(local_copy_list)
+    if hasattr(orm, 'DataDict'):
+        # The static `pseudos` container stages owned copies with fresh UUIDs; only staged paths stay stable.
+        assert [(filename, dest) for _, filename, dest in calc_info.local_copy_list] == [
+            (filename, dest) for _, filename, dest in local_copy_list
+        ]
+    else:
+        assert sorted(calc_info.local_copy_list) == sorted(local_copy_list)
     assert sorted(calc_info.retrieve_list) == sorted(retrieve_list)
     assert sorted(calc_info.retrieve_temporary_list) == sorted(retrieve_temporary_list)
     assert sorted(calc_info.remote_symlink_list) == sorted([])
@@ -103,7 +109,13 @@ def test_pw_ibrav(
     assert isinstance(calc_info, datastructures.CalcInfo)
     assert isinstance(calc_info.codes_info[0], datastructures.CodeInfo)
     assert sorted(calc_info.codes_info[0].cmdline_params) == sorted(cmdline_params)
-    assert sorted(calc_info.local_copy_list) == sorted(local_copy_list)
+    if hasattr(orm, 'DataDict'):
+        # The static `pseudos` container stages owned copies with fresh UUIDs; only staged paths stay stable.
+        assert [(filename, dest) for _, filename, dest in calc_info.local_copy_list] == [
+            (filename, dest) for _, filename, dest in local_copy_list
+        ]
+    else:
+        assert sorted(calc_info.local_copy_list) == sorted(local_copy_list)
     assert sorted(calc_info.retrieve_list) == sorted(retrieve_list)
     assert sorted(calc_info.retrieve_temporary_list) == sorted(retrieve_temporary_list)
     assert sorted(calc_info.remote_symlink_list) == sorted([])
@@ -313,10 +325,12 @@ def test_pw_validate_pseudos_missing(fixture_sandbox, generate_calc_job, generat
     inputs = generate_inputs_pw()
     inputs.pop('pseudos', None)
 
-    with pytest.raises(
-        ValueError,
-        match=r'required value was not provided for the `pseudos` namespace\.',
-    ):
+    if hasattr(orm, 'DataDict'):
+        # The static `pseudos` port is required, so the port itself reports the missing value.
+        match = r"required value was not provided for 'pseudos'"
+    else:
+        match = r'required value was not provided for the `pseudos` namespace\.'
+    with pytest.raises(ValueError, match=match):
         generate_calc_job(fixture_sandbox, entry_point_name, inputs)
 
 
@@ -422,6 +436,10 @@ def test_pw_validate_inputs_parameters_excluded(generate_inputs_pw):
 
     inputs = generate_inputs_pw()
     inputs.pop('parameters')
+    if hasattr(orm, 'DataDict'):
+        # The exposed `pw.pseudos` is a static `DataDict` port; unlike a process launch, direct `validate`
+        # does not apply the `dict` serializer, so wrap explicitly.
+        inputs['pseudos'] = orm.DataDict(inputs['pseudos'])
 
     assert WrapperWorkChain.spec().inputs.validate({'pw': inputs}) is None
 

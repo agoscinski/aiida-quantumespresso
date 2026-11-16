@@ -26,6 +26,31 @@ from .helpers import QEInputValidationError
 LegacyUpfData = DataFactory('core.upf')
 UpfData = DataFactory('pseudo.upf')
 
+#: Whether the running ``aiida-core`` provides the owned ``DataDict`` container. Only ``aiida-core`` 3
+#: exposes ``orm.DataDict``; the 2.x series pinned by this package (``aiida_core~=2.8``) does not, so the
+#: static ``pseudos`` contract below only applies there while the legacy namespace branch is kept for 2.x.
+_HAS_DATA_DICT = hasattr(orm, 'DataDict')
+
+
+def _validate_pseudos_data_dict(value, _):
+    """Validate the static ``pseudos`` input on ``aiida-core`` 3.
+
+    The port itself guarantees a ``DataDict``; the members must be non-empty with each structure kind
+    mapped to a ``UpfData`` node (legacy ``core.upf`` or ``aiida-pseudo`` ``pseudo.upf``). Mixed families
+    cannot share one container: ``DataDict`` locks to a single concrete node type, so mixing raises while
+    serializing and this validator only ever sees homogeneous content.
+
+    :param value: the ``DataDict`` assigned to the ``pseudos`` port.
+    :return: an error message string or ``None`` if valid.
+    """
+    if len(value) == 0:
+        return 'The `pseudos` input is empty; provide one pseudopotential for each structure kind.'
+    for kind_name, pseudo in value.items():
+        if not isinstance(pseudo, (LegacyUpfData, UpfData)):
+            msg = f'Invalid pseudopotential for kind `{kind_name}`: expected `UpfData`, got `{type(pseudo).__name__}`.'
+            return msg
+    return None
+
 
 class BasePwCpInputGenerator(CalcJob):
     """Base `CalcJob` for implementations for pw.x and cp.x of Quantum ESPRESSO."""
@@ -140,13 +165,33 @@ class BasePwCpInputGenerator(CalcJob):
             required=False,
             help='Optional van der Waals table contained in a `SinglefileData`.',
         )
-        spec.input_namespace(
-            'pseudos',
-            valid_type=(LegacyUpfData, UpfData),
-            dynamic=True,
-            required=True,
-            help='A mapping of `UpfData` nodes onto the kind name to which they should apply.',
-        )
+        if _HAS_DATA_DICT:
+            # Static contract on ``aiida-core`` 3: a single `DataDict` owns one pseudo per kind, so graphs
+            # and tasks wire it directly with no dynamic-namespace closure. Plain `dict` launch inputs keep
+            # working: the serializer wraps them without mutating the caller's mapping, copying each node
+            # into the container on insertion.
+            spec.input(
+                'pseudos',
+                valid_type=orm.DataDict,
+                serializer=orm.DataDict,
+                required=True,
+                validator=_validate_pseudos_data_dict,
+                help=(
+                    'A `DataDict` mapping each structure kind name to its `UpfData` node '
+                    '(legacy `core.upf` or `pseudo.upf`). Plain `dict` inputs are accepted and '
+                    'wrapped automatically; every kind needs exactly one entry.'
+                ),
+            )
+        else:
+            # Legacy contract on ``aiida-core`` 2.x (``pyproject`` still pins ``aiida_core~=2.8``): an open
+            # namespace with one `UpfData` entry per kind, kept so stable releases keep working unchanged.
+            spec.input_namespace(
+                'pseudos',
+                valid_type=(LegacyUpfData, UpfData),
+                dynamic=True,
+                required=True,
+                help='A mapping of `UpfData` nodes onto the kind name to which they should apply.',
+            )
 
         spec.input(
             'parallelization',
