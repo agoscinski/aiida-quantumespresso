@@ -8,18 +8,29 @@
 ############################################################################
 """Provenance-preserving merging of ``ph.x`` recover-chain outputs for the native graphs.
 
-The native :func:`ph_base_graph <aiida_quantumespresso.workflows.graphs.base.ph_base_graph>` returns the last
-iteration outputs only; merging the per-iteration ``output_parameters`` of a recover chain is QE
-implementation work. The merge mathematics already exists in the ``merge_ph_outputs`` calcfunction
-(:mod:`aiida_quantumespresso.calculations.functions.merge_ph_outputs`): this module reuses it instead of
-reimplementing it.
+There are two merging routes, with different provenance folds over the same mathematics. The
+native :func:`ph_base_graph <aiida_quantumespresso.workflows.graphs.base.ph_base_graph>` folds
+recover runs incrementally in-graph through ``merge_ph_pair``: each step takes the previous
+aggregate plus the current run's original ``output_parameters`` as direct inputs, so the final
+``Dict`` reaches the members through a chain of pairwise merges; a ``PhMergeCheck`` carry
+validates the multi-run chain at the end (missing originals or a parsed q-point count outside
+the requested ``INPUTPH`` ``start_q``/``last_q`` range fails loudly, reset on a restart from
+scratch, skipped for ``ONLY_INITIALIZATION`` and single runs, mirroring ``ERROR_MERGING_QPOINTS``).
+This module's :func:`merge_ph_graph_outputs` is the external post-hoc route: it walks the stored
+chain of a terminated graph and calls the existing ``merge_ph_outputs`` calcfunction
+(:mod:`aiida_quantumespresso.calculations.functions.merge_ph_outputs`) once with one ``output_<n>``
+input per member, so every member ``Dict`` links directly into a single merged node. The
+post-hoc route stays for terminated graphs and explicit branch selection; neither route claims
+full ``ph`` graph-result parity yet.
 
-There is deliberately no in-graph ``@task`` merge here. A recover chain has a dynamic length, so its members
-cannot be wired as static task inputs in the graph body. ``orm.List`` holds plain values rather than node
-references, while ``DataList``/``DataDict`` hold owned copies made by copy-on-insert with new identities and no
-provenance links, so routing the per-iteration outputs through a container would detach the merge inputs from
-their provenance instead of keeping direct ``INPUT_CALC`` links. No core collector feature is requested for this:
-the chain is finite stored provenance, and the merge runs after termination, owned externally like cleanup.
+There is deliberately no container-forwarded in-graph ``@task`` merge beyond that pairwise fold.
+A recover chain has a dynamic length, so its members cannot be wired as static task inputs in the
+graph body. ``orm.List`` holds plain values rather than node references, while
+``DataList``/``DataDict`` hold owned copies made by copy-on-insert with new identities and no
+provenance links, so routing the per-iteration outputs through a container would detach the merge
+inputs from their provenance instead of keeping direct ``INPUT_CALC`` links. No core collector
+feature is requested for this: the chain is finite stored provenance, and the external merge runs
+after termination, owned externally like cleanup.
 
 Contract:
 

@@ -48,9 +48,18 @@ Per-workflow coverage
 * ``ph_base_graph`` places ``PhCalculation`` with ``errors=PhErrors``. Ported:
   scheduler-walltime ``max_seconds`` halving (only when already present, see above),
   diagonalization switch to ``cg``, out-of-walltime recover restart with the
-  recover latch, and the ``nmix_ph``/``alpha_mix`` convergence chain. Not ported:
-  merging of multi-recover output parameters: a provenance-preserving merge remains
-  QE implementation work; the graph currently returns the last iteration outputs.
+  recover latch, and the ``nmix_ph``/``alpha_mix`` convergence chain. Recover runs fold
+  their ``output_parameters`` into an incremental aggregate through ``merge_ph_pair``
+  (shared ``merge_ph_outputs`` mathematics; previous aggregate plus current original
+  as direct inputs, reset on a restart from scratch, skipped for
+  ``ONLY_INITIALIZATION``); a single run returns its original node with no merge node.
+  A folded ``PhMergeCheck`` validates the recovered multi-run chain at the end: missing
+  originals or a parsed q-point count outside the requested ``INPUTPH`` ``start_q``/``last_q``
+  range (seeded from the first run's ``number_of_qpoints``) fails loudly instead of
+  returning a silent partial merge, reset on a restart from scratch and skipped for
+  ``ONLY_INITIALIZATION`` and single runs, mirroring ``ERROR_MERGING_QPOINTS``. This is
+  still not full ``ph`` parity (no numeric exit codes, ``qpoints_distance`` needs an
+  explicit ``structure``).
   ``qpoints_distance`` takes an explicit ``structure`` input instead of deriving it
   from the parent folder provenance.
 * ``neb_base_graph`` places ``NebCalculation`` directly with ``errors=NebErrors``
@@ -132,12 +141,16 @@ attempts and status. Outputs are existing nodes regrouped, never fabricated data
 """
 
 import typing as t
+from collections.abc import Mapping
 
 from aiida import orm
-from aiida.engine import graph, task
+from aiida.engine import PortModel, graph, task
 from aiida.engine.processes.exit_code import ExitCode, ExitCodeEnum
 
 from aiida_quantumespresso.calculations.bands import BandsCalculation
+from aiida_quantumespresso.calculations.functions.merge_ph_outputs import (
+    merge_ph_outputs as _merge_ph_outputs_calcfunction,
+)
 from aiida_quantumespresso.calculations.matdyn import MatdynCalculation
 from aiida_quantumespresso.calculations.neb import NebCalculation
 from aiida_quantumespresso.calculations.ph import PhCalculation
@@ -274,6 +287,44 @@ class PhRestartPlan(t.TypedDict):
     restart: bool
     recover: bool
     parent_mode: str
+
+
+class PhMerged(PortModel):
+    """Nullable carry for the incremental ``ph`` merged outputs, all leaves absent."""
+
+    merged: orm.Dict | None = None
+
+
+class PhMergeCheck(t.TypedDict):
+    """Loop-carried ``ph`` merge validation: expected/found q-points plus chain shape."""
+
+    expected: int
+    found: int
+    runs: int
+    missing: bool
+    has_expected: bool
+
+
+def _ph_expected_qpoints(output: Mapping[str, t.Any], parameters: Mapping[str, t.Any]) -> int:
+    """Return the requested q-point count for a ``ph`` chain head.
+
+    Mirrors ``PhBaseWorkChain.create_merged_output``: the first run's
+    ``number_of_qpoints`` narrowed by the requested ``INPUTPH`` ``start_q``/``last_q``
+    range. A missing ``number_of_qpoints`` falls back to the parsed irrep count so a
+    malformed head still yields a checkable expectation instead of a ``KeyError``.
+    """
+    base = output.get('number_of_qpoints', None)
+    if base is None:
+        base = len(output.get('number_of_irr_representations_for_each_q', []))
+    inputph = parameters.get('INPUTPH', {}) if isinstance(parameters, Mapping) else {}
+    return int(inputph.get('last_q', base) - inputph.get('start_q', 1) + 1)
+
+
+# Undecorated twin of the ``merge_ph_outputs`` calcfunction. Graph tasks run as
+# calculation processes and so cannot call a decorated ``calcfunction`` (the engine
+# forbids it); calling the shared undecorated implementation keeps the merge
+# mathematics identical without duplicating it and without nested provenance.
+_merge_ph_output_dicts = _merge_ph_outputs_calcfunction.__wrapped__
 
 
 class NebCarry(t.TypedDict):
@@ -895,13 +946,16 @@ def handle_ph_convergence(
 
 
 @task
-def prepare_ph_settings(settings: dict | None, only_initialization: bool) -> dict | None:
-    """Fold ``ONLY_INITIALIZATION`` into the settings, mirroring ``validate_parameters``."""
-    if not only_initialization:
-        return settings
-    merged = dict(settings) if settings is not None else {}
-    merged['ONLY_INITIALIZATION'] = True
-    return merged
+def prepare_ph_settings(settings: dict | None, only_initialization: bool) -> dict:
+    """Prepare settings without returning an absent task output.
+
+    An empty settings mapping has the CalcJob defaults; ``ONLY_INITIALIZATION``
+    is added independently of whether the caller supplied any settings.
+    """
+    prepared = dict(settings) if settings is not None else {}
+    if only_initialization:
+        prepared['ONLY_INITIALIZATION'] = True
+    return prepared
 
 
 @task
@@ -915,16 +969,225 @@ def finalize_ph_carry(
     """Carry the next ``ph`` inputs; the recover flag latches once set.
 
     The latch mirrors ``restart_calc`` in the original, which is never cleared, so every
-    later restart recovers from the latest remote folder. Node selection stays in the
+    later restart recovers from the latest remote folder. Like the legacy
+    ``prepare_process`` (which sets ``INPUTPH.recover = True`` whenever ``restart_calc``
+    is set, even after the scheduler handler wrote ``recover = False``), the carried
+    parameters launch the next run with ``INPUTPH.recover = True`` whenever the latch
+    is active. The parameters are copied before the flag is set so the caller-owned
+    mapping is never mutated. Node selection stays in the
     graph body (see :func:`finalize_pw_carry`).
     """
+    latched = recover_before or recover
+    if latched:
+        updated = {block: dict(values) if isinstance(values, dict) else values for block, values in parameters.items()}
+        inputph = updated.get('INPUTPH', None)
+        if inputph is None:
+            updated['INPUTPH'] = {'recover': True}
+        else:
+            inputph['recover'] = True
+    else:
+        updated = parameters
     return {
-        'parameters': parameters,
+        'parameters': updated,
         'restart': restart,
-        'recover': recover_before or recover,
+        'recover': latched,
         'keep_parent': parent_mode == 'keep',
         'use_remote_parent': parent_mode == 'remote',
     }
+
+
+@task
+def seed_ph_merged() -> PhMerged:
+    """Seed the ``ph`` merged-output carry with an absent leaf.
+
+    Loop-carried wires take their shape from the pre-loop binding, so a ``None``
+    literal would seed a ``None``-only wire that rejects the merged node rebound
+    inside the loop. Seeding from this task's omitted leaf gives a ``None`` value
+    with a union shape, so the ``is None`` keep arm first preserves nullability
+    exactly like ``seed_relax_carry``.
+
+    :return: the empty carry whose leaf stays out until the first merge.
+    """
+    return PhMerged()
+
+
+@task
+def merge_ph_pair(first: orm.Dict, second: orm.Dict) -> orm.Dict:
+    """Merge two ``ph.x`` output-parameter nodes into a new ``Dict``.
+
+    Each call takes the previous aggregate and the current run's original outputs as
+    direct inputs, so every member keeps a direct ``INPUT_CALC`` link into the merged
+    node. The mathematics is the shared ``merge_ph_outputs`` implementation: wall times
+    add up, per-q-point irrep counts concatenate, incomplete dynamical matrices are
+    skipped, and later outputs win on any other shared key. Pairwise application is
+    associative, so folding along the recover chain equals the legacy N-way merge.
+
+    :param first: the previous aggregate.
+    :param second: the current run's original ``output_parameters``.
+    :return: the merged outputs as a new node.
+    """
+    return _merge_ph_output_dicts(output_1=first, output_2=second)
+
+
+@task
+def seed_ph_merge_check() -> PhMergeCheck:
+    """Seed the ``ph`` merge validation with no runs seen.
+
+    :return: the empty check; the first run with outputs sets the expectation.
+    """
+    return {'expected': 0, 'found': 0, 'runs': 0, 'missing': False, 'has_expected': False}
+
+
+@task
+def update_ph_merge_check(
+    expected: int,
+    found: int,
+    runs: int,
+    missing: bool,
+    has_expected: bool,
+    output: orm.Dict | None,
+    parameters: dict,
+    recovered: bool,
+    only_initialization: bool = False,
+) -> PhMergeCheck:
+    """Fold one ``ph`` run into the merge validation.
+
+    Mirrors the aggregate arms: ``ONLY_INITIALIZATION`` leaves the check untouched, a
+    missing ``output_parameters`` flags the chain as partial, the first run with
+    outputs seeds the expectation from its ``number_of_qpoints`` and the requested
+    ``INPUTPH`` range, a recover run accumulates its parsed q-points, and a restart
+    from scratch resets the expectation to the current run. Single runs and
+    ``ONLY_INITIALIZATION`` are never failed by the final check, per the legacy merge.
+    Scalar inputs mirror the handler-chain convention: the carried check is passed
+    field by field, never as a whole mapping.
+
+    :param expected: the requested q-point count carried into this run.
+    :param found: the parsed q-point count carried into this run.
+    :param runs: the chain length carried into this run.
+    :param missing: whether a member already missed its outputs.
+    :param has_expected: whether the expectation is set yet.
+    :param output: the run's original ``output_parameters``, if it exposed any.
+    :param parameters: the plain parameters mapping the run launched with.
+    :param recovered: whether the run recovered from its parent folder.
+    :param only_initialization: whether merging is skipped entirely.
+    :return: the updated check.
+    """
+    if only_initialization:
+        return {
+            'expected': expected,
+            'found': found,
+            'runs': runs,
+            'missing': missing,
+            'has_expected': has_expected,
+        }
+    if runs > 0 and not recovered:
+        # A restart from scratch recomputed its q-points, so prior runs are dropped even when the
+        # current run exposed no outputs to seed a fresh expectation from.
+        if output is None:
+            return {
+                'expected': 0,
+                'found': 0,
+                'runs': 1,
+                'missing': True,
+                'has_expected': False,
+            }
+        data = output.get_dict()
+        parsed = len(data.get('number_of_irr_representations_for_each_q', []))
+        return {
+            'expected': _ph_expected_qpoints(data, parameters),
+            'found': parsed,
+            'runs': 1,
+            'missing': False,
+            'has_expected': True,
+        }
+    if output is None:
+        return {
+            'expected': expected,
+            'found': found,
+            'runs': runs + 1,
+            'missing': True,
+            'has_expected': has_expected,
+        }
+    data = output.get_dict()
+    parsed = len(data.get('number_of_irr_representations_for_each_q', []))
+    if runs == 0:
+        return {
+            'expected': _ph_expected_qpoints(data, parameters),
+            'found': parsed,
+            'runs': 1,
+            'missing': False,
+            'has_expected': True,
+        }
+    if recovered:
+        return {
+            'expected': expected,
+            'found': found + parsed,
+            'runs': runs + 1,
+            'missing': missing,
+            'has_expected': has_expected,
+        }
+    return {
+        'expected': _ph_expected_qpoints(data, parameters),
+        'found': parsed,
+        'runs': 1,
+        'missing': False,
+        'has_expected': True,
+    }
+
+
+@task
+def validate_ph_merge(
+    expected: int,
+    found: int,
+    runs: int,
+    missing: bool,
+    has_expected: bool,
+    only_initialization: bool = False,
+) -> None:
+    """Fail the graph when a recovered multi-run ``ph`` chain is partial.
+
+    Mirrors the legacy ``ERROR_MERGING_QPOINTS`` gate: a chain of two or more runs
+    whose members miss ``output_parameters`` or whose parsed q-points do not cover
+    the requested range fails loudly instead of returning a silent partial merge. A
+    single run and ``ONLY_INITIALIZATION`` pass through unchecked, per the legacy
+    ``create_merged_output`` early returns.
+
+    :param expected: the requested q-point count.
+    :param found: the parsed q-point count.
+    :param runs: the chain length.
+    :param missing: whether a member missed its outputs.
+    :param has_expected: whether the expectation was ever set.
+    :param only_initialization: whether merging was skipped entirely.
+    :raises ValueError: when the multi-run chain is partial.
+    """
+    if only_initialization:
+        return
+    if runs <= 1:
+        return
+    if missing:
+        msg = (
+            'a `ph.x` run in the recover chain exposes no `output_parameters`; refusing to '
+            'merge a partial recover chain.'
+        )
+        raise ValueError(msg)
+    if has_expected and found != expected:
+        msg = f'only {found} of {expected} q-points were parsed; refusing to merge a partial recover chain.'
+        raise ValueError(msg)
+    return
+
+
+@task
+def ph_run_recovered(parameters: dict) -> bool:
+    """Return whether a ``ph`` run's parameters requested a recover restart.
+
+    Mirrors the legacy ``_get_recover_chain`` gate on
+    ``parameters['INPUTPH']['recover']``: a run that did not recover recomputed its
+    q-points, so the aggregate resets to it instead of merging.
+
+    :param parameters: the plain parameters mapping the run launched with.
+    :return: whether the run recovered from its parent folder.
+    """
+    return bool(parameters.get('INPUTPH', {}).get('recover', False))
 
 
 @task
@@ -940,14 +1203,14 @@ def require_ph_restart_nodes(
     parent_mode: str,
     remote_folder: orm.RemoteData | None,
 ) -> None:
-    """Fail loudly when a claimed ``ph`` restart needs a parent a mapped failure hides.
+    """Fail loudly when a claimed ``ph`` restart needs a parent never stored.
 
-    A placement that finishes with a mapped error exposes only its ``error`` arm, so
-    ``remote_folder`` reads as ``None`` downstream even though the failed calculation
-    stored it. The legacy handlers restart from ``restart_calc.outputs.remote_folder``
-    directly, so without this guard a claimed recover restart would silently reuse a
-    stale parent folder with ``recover`` latched on. Fail loudly instead, naming the
-    missing node. Restarts that keep the wired parent pass through untouched.
+    The mapped failure keeps the failed calculation's stored outputs, so
+    ``remote_folder`` rebinds downstream like the legacy handlers reading
+    ``restart_calc.outputs.remote_folder`` directly. The guard stays as defense in
+    depth: it fails loudly, naming the missing node, only when the failed run
+    genuinely never stored one. Restarts that keep the wired parent pass through
+    untouched.
     """
     if not restart:
         return
@@ -1658,14 +1921,24 @@ def ph_base_graph(
     only_initialization: bool = False,
     max_iterations: int = 5,
 ) -> dict:
-    """Run ``ph.x`` with automated restarts, returning the outputs plus a report.
+    """Run ``ph.x`` with automated restarts, returning the merged outputs plus a report.
 
-    Recover restarts fail loudly at ``require_ph_restart_nodes``: mapped error arms
-    hide the failed calculation's ``remote_folder``, so no recover restart can run.
+    Recover restarts rebind the preserved ``remote_folder`` and recover;
+    ``require_ph_restart_nodes`` fails loudly only when the failed run genuinely
+    never stored one.
 
     ``structure`` is only read when ``qpoints_distance`` is given; the original derives
-    it from the parent folder provenance instead. Multi-recover output merging is not
-    ported: the last iteration outputs are returned.
+    it from the parent folder provenance instead. Recover runs fold their
+    ``output_parameters`` into an incremental aggregate through ``merge_ph_pair`` (shared
+    ``merge_ph_outputs`` mathematics): the previous aggregate plus the current run's
+    original outputs become a new ``Dict`` with direct links, a restart from scratch
+    (``INPUTPH.recover`` unset) resets the aggregate to the current run, and
+    ``ONLY_INITIALIZATION`` skips merging entirely. A single run returns its original
+    node with no merge node. A recovered multi-run chain is validated at the end against
+    the requested ``INPUTPH`` ``start_q``/``last_q`` range (seeded from the first run's
+    ``number_of_qpoints``): missing originals or a short parsed count fails loudly
+    instead of returning a partial merge, reset on a restart from scratch and skipped
+    for ``ONLY_INITIALIZATION`` and single runs. ``remote_folder`` is the last run's folder.
     """
     if qpoints is None:
         resolved_qpoints = gen_kpoints(
@@ -1675,12 +1948,39 @@ def ph_base_graph(
         resolved_qpoints = qpoints
     prepared_settings = prepare_ph_settings(settings=settings, only_initialization=only_initialization)
     prepared = seed_ph_parameters(parameters=parameters)
+    prepared_recovered = ph_run_recovered(parameters=prepared)
+    merged_seed = seed_ph_merged()
+    merged = merged_seed.merged
+    check_seed = seed_ph_merge_check()
     run = ph_calc(
         code=code,
         parent_folder=parent_folder,
         parameters=prepared,
         settings=prepared_settings,
         qpoints=resolved_qpoints,
+    )
+    if only_initialization:
+        merged = merged  # noqa: PLW0127 - skip arm keeps the empty aggregate
+    elif merged is None:
+        merged = run.output_parameters
+    elif not prepared_recovered:
+        merged = run.output_parameters
+    elif run.output_parameters is None:
+        merged = merged  # noqa: PLW0127 - keep arm rebinds the same wire to stay nullable
+    elif prepared_recovered:
+        merged = merge_ph_pair(first=merged, second=run.output_parameters)
+    else:
+        merged = run.output_parameters
+    check = update_ph_merge_check(
+        expected=check_seed.expected,
+        found=check_seed.found,
+        runs=check_seed.runs,
+        missing=check_seed.missing,
+        has_expected=check_seed.has_expected,
+        output=run.output_parameters,
+        parameters=prepared,
+        recovered=prepared_recovered,
+        only_initialization=only_initialization,
     )
     plan_walltime = handle_ph_scheduler_walltime(error=run.error, parameters=prepared)
     plan_diagonalization = handle_ph_diagonalization(
@@ -1728,12 +2028,36 @@ def ph_base_graph(
     attempts = 1
     while (run.error is not None or restart) and attempts < max_iterations:
         attempts = attempts + 1
+        current_recovered = ph_run_recovered(parameters=final.parameters)
         run = ph_calc(
             code=code,
             parent_folder=parent,
             parameters=final.parameters,
             settings=prepared_settings,
             qpoints=resolved_qpoints,
+        )
+        if only_initialization:
+            merged = merged  # noqa: PLW0127 - skip arm keeps the aggregate empty
+        elif merged is None:
+            merged = run.output_parameters
+        elif not current_recovered:
+            merged = run.output_parameters
+        elif run.output_parameters is None:
+            merged = merged  # noqa: PLW0127 - keep arm rebinds the same wire to stay nullable
+        elif current_recovered:
+            merged = merge_ph_pair(first=merged, second=run.output_parameters)
+        else:
+            merged = run.output_parameters
+        check = update_ph_merge_check(
+            expected=check.expected,
+            found=check.found,
+            runs=check.runs,
+            missing=check.missing,
+            has_expected=check.has_expected,
+            output=run.output_parameters,
+            parameters=final.parameters,
+            recovered=current_recovered,
+            only_initialization=only_initialization,
         )
         plan_walltime = handle_ph_scheduler_walltime(error=run.error, parameters=final.parameters)
         plan_diagonalization = handle_ph_diagonalization(
@@ -1778,13 +2102,27 @@ def ph_base_graph(
             parent = None
         restart = plan_convergence.restart
     checked = ensure_ph_recovered(error=run.error, restart=restart)
+    merge_checked = validate_ph_merge(
+        expected=check.expected,
+        found=check.found,
+        runs=check.runs,
+        missing=check.missing,
+        has_expected=check.has_expected,
+        only_initialization=only_initialization,
+        after=checked,
+    )
     if run.error is None and not restart:
         status = 'finished'
     else:
         status = 'exhausted'
-    report = summarize_restart(attempts=attempts, status=status, after=checked)
+    report = summarize_restart(attempts=attempts, status=status, after=merge_checked)
+    if merged is None:
+        output_parameters = run.output_parameters
+    else:
+        output_parameters = merged
     return {
-        'output_parameters': run.output_parameters,
+        'output_parameters': output_parameters,
+        'remote_folder': run.remote_folder,
         'report': report,
     }
 

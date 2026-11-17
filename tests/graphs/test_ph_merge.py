@@ -32,6 +32,7 @@ from aiida.orm import CalcJobNode, Dict, GraphNode, RemoteData
 from aiida_quantumespresso.calculations.functions.merge_ph_outputs import (
     merge_ph_outputs as merge_ph_outputs_calcfunction,
 )
+from aiida_quantumespresso.workflows.graphs import base as graphs_base
 from aiida_quantumespresso.workflows.graphs.ph import (
     PH_CALCULATION_PROCESS_TYPE,
     get_ph_recover_chain,
@@ -285,3 +286,217 @@ def test_missing_output_parameters_raise(aiida_localhost) -> None:
     assert get_ph_recover_chain(node) == [calc]
     with pytest.raises(ValueError, match='exposes no `output_parameters`'):
         merge_ph_graph_outputs(node)
+
+
+def test_base_merge_ph_pair_matches_pure_helper() -> None:
+    """The in-graph incremental merge task equals the pure mapping merge."""
+    outputs, node = run_get_node(graphs_base.merge_ph_pair, first=Dict(_OUTPUT_A), second=Dict(_OUTPUT_B))
+    assert node.is_finished_ok
+    assert outputs.get_dict() == merge_ph_output_dicts([_OUTPUT_A, _OUTPUT_B])
+    incoming = {link.link_label for link in node.base.links.get_incoming().all()}
+    assert incoming == {'first', 'second'}
+
+
+def test_base_ph_run_recovered_reads_inputph() -> None:
+    """The recover gate mirrors the legacy ``INPUTPH.recover`` check."""
+    recovered, _ = run_get_node(graphs_base.ph_run_recovered, parameters={'INPUTPH': {'recover': True}})
+    assert recovered.value is True
+    scratch, _ = run_get_node(graphs_base.ph_run_recovered, parameters={'INPUTPH': {'recover': False}})
+    assert scratch.value is False
+    missing, _ = run_get_node(graphs_base.ph_run_recovered, parameters={})
+    assert missing.value is False
+
+
+def test_base_seed_ph_merged_is_empty() -> None:
+    """The merge carry seeds empty so the first run rebinds with its identity."""
+    outputs, node = run_get_node(graphs_base.seed_ph_merged)
+    assert node.is_finished_ok
+    assert dict(outputs) == {}
+
+
+def test_base_ph_graph_builds_with_merge() -> None:
+    """The production ``ph`` graph still validates with the merge wiring."""
+    assert graphs_base.ph_base_graph.build() is None
+
+
+def _ph_output_dict(irreps: tuple, total: int) -> Dict:
+    """Return an unstored ``output_parameters``-shaped ``Dict``."""
+    return Dict(dict(_OUTPUT_A, number_of_irr_representations_for_each_q=list(irreps), number_of_qpoints=total))
+
+
+def test_base_seed_ph_merge_check_is_empty() -> None:
+    """The merge validation seeds with no runs seen."""
+    outputs, node = run_get_node(graphs_base.seed_ph_merge_check)
+    assert node.is_finished_ok
+    assert outputs == {'expected': 0, 'found': 0, 'runs': 0, 'missing': False, 'has_expected': False}
+
+
+def _check_kwargs(check: dict) -> dict:
+    """Return the scalar validation inputs for the merge-check tasks."""
+    return {
+        'expected': check['expected'],
+        'found': check['found'],
+        'runs': check['runs'],
+        'missing': check['missing'],
+        'has_expected': check['has_expected'],
+    }
+
+
+def test_base_ph_merge_check_success() -> None:
+    """Two recover runs covering the requested range validate cleanly."""
+    seed, _ = run_get_node(graphs_base.seed_ph_merge_check)
+    first, _ = run_get_node(
+        graphs_base.update_ph_merge_check,
+        **_check_kwargs(dict(seed)),
+        output=_ph_output_dict((3, 3), 4),
+        parameters={'INPUTPH': {'start_q': 1, 'last_q': 4}},
+        recovered=True,
+        only_initialization=False,
+    )
+    assert (first['expected'], first['found'], first['runs'], first['missing']) == (4, 2, 1, False)
+    second, _ = run_get_node(
+        graphs_base.update_ph_merge_check,
+        **_check_kwargs(dict(first)),
+        output=_ph_output_dict((3, 3), 4),
+        parameters={'INPUTPH': {'start_q': 1, 'last_q': 4}},
+        recovered=True,
+        only_initialization=False,
+    )
+    assert (second['expected'], second['found'], second['runs']) == (4, 4, 2)
+    _, node = run_get_node(graphs_base.validate_ph_merge, **_check_kwargs(dict(second)), only_initialization=False)
+    assert node.is_finished_ok
+
+
+def test_base_ph_merge_check_range_incomplete() -> None:
+    """A short parsed count fails the final validation instead of merging partially."""
+    seed, _ = run_get_node(graphs_base.seed_ph_merge_check)
+    first, _ = run_get_node(
+        graphs_base.update_ph_merge_check,
+        **_check_kwargs(dict(seed)),
+        output=_ph_output_dict((3, 3), 4),
+        parameters={'INPUTPH': {'start_q': 1, 'last_q': 4}},
+        recovered=True,
+        only_initialization=False,
+    )
+    short, _ = run_get_node(
+        graphs_base.update_ph_merge_check,
+        **_check_kwargs(dict(first)),
+        output=_ph_output_dict((3,), 4),
+        parameters={'INPUTPH': {'start_q': 1, 'last_q': 4}},
+        recovered=True,
+        only_initialization=False,
+    )
+    assert (short['expected'], short['found'], short['runs']) == (4, 3, 2)
+    with pytest.raises(ValueError, match=r'only 3 of 4 q-points were parsed'):
+        run_get_node(graphs_base.validate_ph_merge, **_check_kwargs(dict(short)), only_initialization=False)
+
+
+def test_base_ph_merge_check_missing_output() -> None:
+    """A missing original in a multi-run chain fails instead of merging partially."""
+    seed, _ = run_get_node(graphs_base.seed_ph_merge_check)
+    first, _ = run_get_node(
+        graphs_base.update_ph_merge_check,
+        **_check_kwargs(dict(seed)),
+        output=_ph_output_dict((3, 3), 4),
+        parameters={'INPUTPH': {'start_q': 1, 'last_q': 4}},
+        recovered=True,
+        only_initialization=False,
+    )
+    missing, _ = run_get_node(
+        graphs_base.update_ph_merge_check,
+        **_check_kwargs(dict(first)),
+        output=None,
+        parameters={'INPUTPH': {'start_q': 1, 'last_q': 4}},
+        recovered=True,
+        only_initialization=False,
+    )
+    assert missing['missing'].value is True and missing['runs'].value == 2
+    with pytest.raises(ValueError, match='exposes no `output_parameters`'):
+        run_get_node(graphs_base.validate_ph_merge, **_check_kwargs(dict(missing)), only_initialization=False)
+
+
+def test_base_ph_merge_check_reset_and_skips() -> None:
+    """A scratch restart resets the expectation; single runs and init runs skip the check."""
+    seed, _ = run_get_node(graphs_base.seed_ph_merge_check)
+    first, _ = run_get_node(
+        graphs_base.update_ph_merge_check,
+        **_check_kwargs(dict(seed)),
+        output=_ph_output_dict((3, 3), 4),
+        parameters={'INPUTPH': {'start_q': 1, 'last_q': 4}},
+        recovered=True,
+        only_initialization=False,
+    )
+    reset, _ = run_get_node(
+        graphs_base.update_ph_merge_check,
+        **_check_kwargs(dict(first)),
+        output=_ph_output_dict((3, 3), 2),
+        parameters={'INPUTPH': {'start_q': 1, 'last_q': 2}},
+        recovered=False,
+        only_initialization=False,
+    )
+    assert (reset['expected'], reset['found'], reset['runs'], reset['missing']) == (2, 2, 1, False)
+    _, node = run_get_node(graphs_base.validate_ph_merge, **_check_kwargs(dict(reset)), only_initialization=False)
+    assert node.is_finished_ok
+    _, single = run_get_node(graphs_base.validate_ph_merge, **_check_kwargs(dict(first)), only_initialization=False)
+    assert single.is_finished_ok
+    _, skipped = run_get_node(graphs_base.validate_ph_merge, **_check_kwargs(dict(seed)), only_initialization=True)
+    assert skipped.is_finished_ok
+
+
+def test_base_ph_merge_check_scratch_missing_resets() -> None:
+    """A scratch run without outputs drops prior runs instead of flagging them partial."""
+    seed, _ = run_get_node(graphs_base.seed_ph_merge_check)
+    first, _ = run_get_node(
+        graphs_base.update_ph_merge_check,
+        **_check_kwargs(dict(seed)),
+        output=_ph_output_dict((3, 3), 4),
+        parameters={'INPUTPH': {'start_q': 1, 'last_q': 4}},
+        recovered=True,
+        only_initialization=False,
+    )
+    reset, _ = run_get_node(
+        graphs_base.update_ph_merge_check,
+        **_check_kwargs(dict(first)),
+        output=None,
+        parameters={'INPUTPH': {'start_q': 1, 'last_q': 4}},
+        recovered=False,
+        only_initialization=False,
+    )
+    assert (reset['expected'].value, reset['found'].value) == (0, 0)
+    assert (reset['runs'].value, reset['missing'].value, reset['has_expected'].value) == (1, True, False)
+
+
+def test_base_finalize_ph_carry_sets_recover() -> None:
+    """The latched carry launches the next run with ``INPUTPH.recover=True``."""
+    params = {'INPUTPH': {'recover': False, 'max_seconds': 10.0}}
+    latched, _ = run_get_node(
+        graphs_base.finalize_ph_carry,
+        parameters=params,
+        restart=True,
+        recover=True,
+        parent_mode='remote',
+        recover_before=False,
+    )
+    assert latched['recover'].value is True
+    assert latched['parameters']['INPUTPH']['recover'] is True
+    assert params['INPUTPH']['recover'] is False
+    before, _ = run_get_node(
+        graphs_base.finalize_ph_carry,
+        parameters={'INPUTPH': {'recover': False}},
+        restart=True,
+        recover=False,
+        parent_mode='remote',
+        recover_before=True,
+    )
+    assert before['recover'].value is True
+    assert before['parameters']['INPUTPH']['recover'] is True
+    unlatched, _ = run_get_node(
+        graphs_base.finalize_ph_carry,
+        parameters={'INPUTPH': {'diagonalization': 'cg'}},
+        restart=True,
+        recover=False,
+        parent_mode='keep',
+        recover_before=False,
+    )
+    assert unlatched['recover'].value is False
+    assert 'recover' not in unlatched['parameters']['INPUTPH']
