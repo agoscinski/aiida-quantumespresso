@@ -145,8 +145,14 @@ def test_bands_retry_keeps_independent_scope_options(monkeypatch, aiida_code_ins
         scf_kpoints_distance=Float(0.5),
         bands_kpoints_distance=Float(0.3),
         task_metadata={
-            'scf': {'pw_calc': {'options': {'max_wallclock_seconds': 1111}}},
-            'bands': {'pw_calc': {'options': {'max_wallclock_seconds': 2222}}},
+            'scf': {
+                'pw_calc': {'options': {'max_wallclock_seconds': 1111}},
+                'pw_calc_monitored': {'options': {'max_wallclock_seconds': 1111}},
+            },
+            'bands': {
+                'pw_calc': {'options': {'max_wallclock_seconds': 2222}},
+                'pw_calc_monitored': {'options': {'max_wallclock_seconds': 2222}},
+            },
         },
     )
     assert node.is_finished_ok, node.exit_message
@@ -180,7 +186,10 @@ def test_bands_missing_scope_entry_fails_loudly(monkeypatch, aiida_code_installe
             scf_kpoints_distance=Float(0.5),
             bands_kpoints_distance=Float(0.3),
             task_metadata={
-                'scf': {'pw_calc': {'options': {'max_wallclock_seconds': 1111}}},
+                'scf': {
+                    'pw_calc': {'options': {'max_wallclock_seconds': 1111}},
+                    'pw_calc_monitored': {'options': {'max_wallclock_seconds': 1111}},
+                },
             },
         )
 
@@ -204,8 +213,8 @@ def test_bands_misspelled_scope_rejected(monkeypatch, aiida_code_installed) -> N
             scf_kpoints_distance=Float(0.5),
             bands_kpoints_distance=Float(0.3),
             task_metadata={
-                'scf': {'pw_calc': {'options': {}}},
-                'bandz': {'pw_calc': {'options': {}}},
+                'scf': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}},
+                'bandz': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}},
             },
         )
 
@@ -229,7 +238,7 @@ def test_bands_malformed_leaf_rejected(monkeypatch, aiida_code_installed) -> Non
             scf_kpoints_distance=Float(0.5),
             bands_kpoints_distance=Float(0.3),
             task_metadata={
-                'scf': {'pw_calc': {'options': {}}},
+                'scf': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}},
                 'bands': {'pw_calc': ['not-a-mapping']},
             },
         )
@@ -253,8 +262,8 @@ def test_bands_monitors_reach_nested_calcs(monkeypatch, aiida_code_installed) ->
         bands_kpoints_distance=Float(0.3),
         monitors=monitors,
         task_metadata={
-            'scf': {'pw_calc': {'options': {}}},
-            'bands': {'pw_calc': {'options': {}}},
+            'scf': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}},
+            'bands': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}},
         },
     )
     assert node.is_finished_ok, node.exit_message
@@ -282,8 +291,8 @@ def test_bands_per_stage_monitors(monkeypatch, aiida_code_installed) -> None:
         monitors=_monitors(),
         bands_monitors=_monitors(min_repeats=3),
         task_metadata={
-            'scf': {'pw_calc': {'options': {}}},
-            'bands': {'pw_calc': {'options': {}}},
+            'scf': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}},
+            'bands': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}},
         },
     )
     assert node.is_finished_ok, node.exit_message
@@ -309,8 +318,8 @@ def test_relax_monitors_thread_through(monkeypatch, aiida_code_installed) -> Non
         kpoints=_kpoints(),
         monitors=_monitors(),
         task_metadata={
-            'init_relax_guarded': {'initial': {'pw_calc': {'options': {}}}},
-            'main': {'pw_calc': {'options': {}}},
+            'init_relax_guarded': {'initial': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}}},
+            'main': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}},
         },
     )
     assert node.is_finished_ok, node.exit_message
@@ -355,9 +364,15 @@ def test_pdos_retry_keeps_nscf_scope_options(monkeypatch, aiida_code_installed) 
         nscf_kpoints_distance=Float(0.5),
         monitors=_monitors(),
         task_metadata={
-            'scf': {'pw_calc': {'options': {'max_wallclock_seconds': 1111}}},
+            'scf': {
+                'pw_calc': {'options': {'max_wallclock_seconds': 1111}},
+                'pw_calc_monitored': {'options': {'max_wallclock_seconds': 1111}},
+            },
             'pdos_stage_serial': {
-                'nscf': {'pw_calc': {'options': {'max_wallclock_seconds': 2222}}},
+                'nscf': {
+                    'pw_calc': {'options': {'max_wallclock_seconds': 2222}},
+                    'pw_calc_monitored': {'options': {'max_wallclock_seconds': 2222}},
+                },
                 'dos_calc': {'options': {}},
                 'projwfc_calc': {'options': {}},
             },
@@ -406,8 +421,9 @@ def test_protocol_bands_nested_scopes_and_monitors(aiida_code_installed) -> None
     task_metadata = launch['task_metadata']
     assert set(task_metadata) == {'scf', 'bands'}
     for scope in ('scf', 'bands'):
-        assert set(task_metadata[scope]) == {'pw_calc'}
+        assert set(task_metadata[scope]) == {'pw_calc', 'pw_calc_monitored'}
         assert task_metadata[scope]['pw_calc']['options']['max_wallclock_seconds'] == 43200
+        assert task_metadata[scope]['pw_calc_monitored'] == task_metadata[scope]['pw_calc']
     assert 'scf_monitors' in launch or 'monitors' in launch
     monitors_node = launch.get('scf_monitors', launch.get('monitors'))
     assert isinstance(monitors_node, DataDict)
@@ -534,9 +550,14 @@ def test_protocol_pdos_nested_scopes(aiida_code_installed) -> None:
     )
     task_metadata = launch['task_metadata']
     assert set(task_metadata) == {'scf', 'pdos_stage_serial'}
-    assert set(task_metadata['scf']) == {'pw_calc'}
+    assert set(task_metadata['scf']) == {'pw_calc', 'pw_calc_monitored'}
     assert set(task_metadata['pdos_stage_serial']) == {'nscf', 'dos_calc', 'projwfc_calc'}
-    assert set(task_metadata['pdos_stage_serial']['nscf']) == {'pw_calc'}
+    assert set(task_metadata['pdos_stage_serial']['nscf']) == {'pw_calc', 'pw_calc_monitored'}
+    assert task_metadata['scf']['pw_calc_monitored'] == task_metadata['scf']['pw_calc']
+    assert (
+        task_metadata['pdos_stage_serial']['nscf']['pw_calc_monitored']
+        == task_metadata['pdos_stage_serial']['nscf']['pw_calc']
+    )
     for leaf in (
         task_metadata['scf']['pw_calc'],
         task_metadata['pdos_stage_serial']['nscf']['pw_calc'],
@@ -564,8 +585,8 @@ def test_graph_root_nodes_are_native(monkeypatch, aiida_code_installed) -> None:
         scf_kpoints_distance=Float(0.5),
         bands_kpoints_distance=Float(0.3),
         task_metadata={
-            'scf': {'pw_calc': {'options': {}}},
-            'bands': {'pw_calc': {'options': {}}},
+            'scf': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}},
+            'bands': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}},
         },
     )
     assert node.is_finished_ok, node.exit_message

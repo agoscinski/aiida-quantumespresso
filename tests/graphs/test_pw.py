@@ -41,6 +41,7 @@ from aiida.orm import (
     QueryBuilder,
     RemoteData,
     StructureData,
+    TrajectoryData,
 )
 
 import aiida_quantumespresso.workflows.graphs.pw as pw_module
@@ -50,6 +51,8 @@ from aiida_quantumespresso.workflows.graphs.pw import (
     prepare_next_relax,
     pw_bands_graph,
     pw_relax_graph,
+    require_base_finished,
+    require_relax_base,
     resolve_bands_parameters,
     summarize_relax,
 )
@@ -108,7 +111,11 @@ class StubPwOutputs(t.TypedDict):
     output_parameters: Dict
     output_structure: StructureData
     output_band: BandsData
+    output_kpoints: KpointsData
+    output_atomic_occupations: Dict
+    output_trajectory: TrajectoryData
     remote_folder: RemoteData
+    report: Dict
 
 
 def _stub_remote(path: str) -> RemoteData:
@@ -130,6 +137,8 @@ def stub_pw_base(
     monitors: DataDict | None = None,
 ) -> StubPwOutputs:
     """Deterministic stand-in for ``pw_base_graph``: echo the band count, scale the cell, fabricate the rest."""
+    import numpy as np
+
     params = parameters.get_dict()
     scale = float(params.get('DIRECTIVE', {}).get('scale', 1.0))
     scaled = StructureData(
@@ -145,11 +154,26 @@ def stub_pw_base(
     bands = BandsData()
     bands.set_kpointsdata(kpoints_node)
     bands.set_bands([[0.0], [0.0]])
+    trajectory = TrajectoryData()
+    trajectory.set_trajectory(
+        stepids=np.array([0]),
+        cells=np.array([[[10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]]]),
+        symbols=['Si'],
+        positions=np.array([[[0.0, 0.0, 0.0]]]),
+    )
+    trajectory.set_array('stress', np.zeros((1, 3, 3)))
+    report = Dict({'attempts': 1, 'status': 'finished'})
+    kpoints_out = KpointsData()
+    kpoints_out.set_kpoints([(0.0, 0.0, 0.0)])
     return {
         'output_parameters': output_parameters,
         'output_structure': scaled,
         'output_band': bands,
+        'output_kpoints': kpoints_out,
+        'output_atomic_occupations': Dict({'atomic_occupations': {'spin_up': [], 'spin_down': []}}),
+        'output_trajectory': trajectory,
         'remote_folder': _stub_remote('/tmp/stub-pw-base'),
+        'report': report,
     }
 
 
@@ -172,6 +196,22 @@ def _substitute_pw_base(monkeypatch) -> None:
 def test_build_relax_graph() -> None:
     """The real relax graph validates without launching anything."""
     assert pw_relax_graph.build() is None
+
+
+def test_build_relax_graph_output_contract() -> None:
+    """The relax graph declares the legacy final-calculation outputs alongside structure and report."""
+    from aiida.engine.processes.graphs.lowering import compile_graph
+
+    assert set(compile_graph(pw_relax_graph).outputs) == {
+        'output_structure',
+        'output_parameters',
+        'output_trajectory',
+        'output_band',
+        'output_kpoints',
+        'output_atomic_occupations',
+        'remote_folder',
+        'report',
+    }
 
 
 def test_build_bands_graph() -> None:
@@ -218,28 +258,37 @@ def test_relax_scopes_follow_authored_aliases() -> None:
     initial branch nests the ``initial`` base alias inside the
     ``init_relax_guarded`` wrapper scope, the main loop places ``main`` with
     no generated suffix, and no placement calls ``pw_base_graph`` directly.
+    Each base call site carries both the plain ``pw_calc`` and the monitored
+    ``pw_calc_monitored`` (static ``monitors.stuck``) placements.
     """
     from aiida.engine.processes.graphs.lowering import compile_graph
 
     assert _calcjob_paths(compile_graph(pw_relax_graph)) == {
         ('init_relax_guarded', 'initial', 'pw_calc'),
+        ('init_relax_guarded', 'initial', 'pw_calc_monitored'),
         ('main', 'pw_calc'),
+        ('main', 'pw_calc_monitored'),
     }
-    assert _calcjob_paths(compile_graph(pw_module.init_relax_guarded)) == {('initial', 'pw_calc')}
+    assert _calcjob_paths(compile_graph(pw_module.init_relax_guarded)) == {
+        ('initial', 'pw_calc'),
+        ('initial', 'pw_calc_monitored'),
+    }
 
 
 def test_bands_scopes_follow_authored_aliases() -> None:
     """The compiled bands graph addresses SCF/bands through ``scf``/``bands``.
 
         The check compiles the production graph itself (no copies): each stage
-        descends exactly one level to the shared ``pw_calc`` leaf with no
-    generated numeric suffix and no direct ``pw_base_graph`` placement.
+        descends exactly one level to the shared ``pw_calc``/``pw_calc_monitored``
+    leaves with no generated numeric suffix and no direct ``pw_base_graph`` placement.
     """
     from aiida.engine.processes.graphs.lowering import compile_graph
 
     assert _calcjob_paths(compile_graph(pw_bands_graph)) == {
         ('scf', 'pw_calc'),
+        ('scf', 'pw_calc_monitored'),
         ('bands', 'pw_calc'),
+        ('bands', 'pw_calc_monitored'),
     }
 
 
@@ -320,6 +369,171 @@ def test_prepare_next_relax_without_structure_fails() -> None:
             kpoints_distance=None,
             force_parity=False,
             meta_convergence=True,
+        )
+
+
+def _converged_trajectory() -> TrajectoryData:
+    """Return a trajectory whose pressure matches the default reference within tolerance."""
+    import numpy as np
+
+    trajectory = TrajectoryData()
+    trajectory.set_trajectory(
+        stepids=np.array([0]),
+        cells=np.array([[[10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]]]),
+        symbols=['Si'],
+        positions=np.array([[[0.0, 0.0, 0.0]]]),
+    )
+    trajectory.set_array('stress', np.zeros((1, 3, 3)))
+    return trajectory
+
+
+def _stressed_trajectory(pressure: float = 10.0) -> TrajectoryData:
+    """Return a trajectory whose pressure overshoots the default threshold."""
+    import numpy as np
+
+    trajectory = TrajectoryData()
+    trajectory.set_trajectory(
+        stepids=np.array([0]),
+        cells=np.array([[[10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]]]),
+        symbols=['Si'],
+        positions=np.array([[[0.0, 0.0, 0.0]]]),
+    )
+    trajectory.set_array('stress', (np.eye(3) * pressure)[np.newaxis, :, :])
+    return trajectory
+
+
+def test_prepare_next_501_converged() -> None:
+    """A ``501`` outcome within the Pulay pressure tolerance requests no rerun."""
+    outputs, node = run_get_node(
+        prepare_next_relax,
+        parameters=_vc_relax_parameters(),
+        output_parameters=Dict({'number_of_bands': 9}),
+        structure_before=_cubic(),
+        structure_after=_cubic(),
+        kpoints_distance=Float(0.5),
+        force_parity=False,
+        meta_convergence=True,
+        report=Dict({'attempts': 1, 'status': 'finished_ionic_convergence_reached_except_final_scf'}),
+        output_trajectory=_converged_trajectory(),
+    )
+    assert node.is_finished_ok
+    assert outputs['rerun'].value is False
+    assert outputs['parameters'].get_dict()['SYSTEM']['nbnd'] == 9
+
+
+def test_prepare_next_501_rerun() -> None:
+    """A ``501`` outcome with Pulay stresses still present requests another iteration."""
+    outputs, node = run_get_node(
+        prepare_next_relax,
+        parameters=_vc_relax_parameters(),
+        output_parameters=Dict({'number_of_bands': 9}),
+        structure_before=_cubic(),
+        structure_after=_cubic(),
+        kpoints_distance=Float(0.5),
+        force_parity=False,
+        meta_convergence=True,
+        report=Dict({'attempts': 1, 'status': 'finished_ionic_convergence_reached_except_final_scf'}),
+        output_trajectory=_stressed_trajectory(),
+    )
+    assert node.is_finished_ok
+    assert outputs['rerun'].value is True
+
+
+def test_prepare_next_501_meta_off_converged() -> None:
+    """A ``501`` outcome with meta-convergence off requests no rerun without a stress check."""
+    outputs, node = run_get_node(
+        prepare_next_relax,
+        parameters=_vc_relax_parameters(),
+        output_parameters=Dict({'number_of_bands': 8}),
+        structure_before=_cubic(),
+        structure_after=_cubic(),
+        kpoints_distance=Float(0.5),
+        force_parity=False,
+        meta_convergence=False,
+        report=Dict({'attempts': 1, 'status': 'finished_ionic_convergence_reached_except_final_scf'}),
+        output_trajectory=None,
+    )
+    assert node.is_finished_ok
+    assert outputs['rerun'].value is False
+
+
+def test_prepare_next_501_missing_trajectory_fails() -> None:
+    """A ``501`` outcome without a trajectory fails loudly instead of retrying degraded."""
+    with pytest.raises(ValueError, match='without an output trajectory'):
+        run_get_node(
+            prepare_next_relax,
+            parameters=_vc_relax_parameters(),
+            output_parameters=Dict({'number_of_bands': 8}),
+            structure_before=_cubic(),
+            structure_after=_cubic(),
+            kpoints_distance=Float(0.5),
+            force_parity=False,
+            meta_convergence=True,
+            report=Dict({'attempts': 1, 'status': 'finished_ionic_convergence_reached_except_final_scf'}),
+            output_trajectory=None,
+        )
+
+
+def test_prepare_next_710_rejects() -> None:
+    """A ``710`` outcome fails the relax decision instead of flowing downstream."""
+    with pytest.raises(ValueError, match='electronic-convergence warning'):
+        run_get_node(
+            prepare_next_relax,
+            parameters=_vc_relax_parameters(),
+            output_parameters=Dict({'number_of_bands': 8}),
+            structure_before=_cubic(),
+            structure_after=_cubic(),
+            kpoints_distance=Float(0.5),
+            force_parity=False,
+            meta_convergence=True,
+            report=Dict({'attempts': 1, 'status': 'finished_electronic_convergence_warning'}),
+            output_trajectory=_converged_trajectory(),
+        )
+
+
+def test_require_base_finished_ok() -> None:
+    """A fully converged base report passes the bands guard."""
+    _, node = run_get_node(require_base_finished, report=Dict({'attempts': 1, 'status': 'finished'}), stage='scf')
+    assert node.is_finished_ok
+
+
+def test_require_base_finished_rejects_501() -> None:
+    """A considered-finished ``501`` report fails the bands guard."""
+    with pytest.raises(ValueError, match='501|finished_ionic'):
+        run_get_node(
+            require_base_finished,
+            report=Dict({'attempts': 1, 'status': 'finished_ionic_convergence_reached_except_final_scf'}),
+            stage='scf',
+        )
+
+
+def test_require_base_finished_rejects_710() -> None:
+    """A considered-finished ``710`` report fails the bands guard."""
+    with pytest.raises(ValueError, match='710|finished_electronic'):
+        run_get_node(
+            require_base_finished,
+            report=Dict({'attempts': 1, 'status': 'finished_electronic_convergence_warning'}),
+            stage='bands',
+        )
+
+
+def test_require_relax_base_accepts_finished_and_501() -> None:
+    """The initial-relax guard accepts fully converged and ``501`` reports."""
+    _, ok_node = run_get_node(require_relax_base, report=Dict({'attempts': 1, 'status': 'finished'}))
+    assert ok_node.is_finished_ok
+    _, pulay_node = run_get_node(
+        require_relax_base,
+        report=Dict({'attempts': 1, 'status': 'finished_ionic_convergence_reached_except_final_scf'}),
+    )
+    assert pulay_node.is_finished_ok
+
+
+def test_require_relax_base_rejects_710() -> None:
+    """The initial-relax guard rejects a ``710`` report."""
+    with pytest.raises(ValueError, match='electronic-convergence warning'):
+        run_get_node(
+            require_relax_base,
+            report=Dict({'attempts': 1, 'status': 'finished_electronic_convergence_warning'}),
         )
 
 
@@ -434,6 +648,16 @@ def test_production_relax_converged(monkeypatch, aiida_code_installed) -> None:
     assert outputs['report'].get_dict()['attempts'] == 1
     assert outputs['report'].get_dict()['status'] == 'converged'
     assert outputs['output_structure'].cell == structure.cell
+    stub = next(child for child in node.called_descendants if child.process_label == 'stub_pw_base')
+    for name in (
+        'output_parameters',
+        'output_trajectory',
+        'output_band',
+        'output_kpoints',
+        'output_atomic_occupations',
+        'remote_folder',
+    ):
+        assert outputs[name].uuid == stub.outputs[name].uuid
     assert node.inputs.structure.uuid == structure.uuid
     assert node.base.links.get_outgoing(link_type=LinkType.CREATE).all() == []
     assert sum(1 for child in node.called_descendants if child.process_label == 'stub_pw_base') == 1
@@ -523,6 +747,15 @@ def test_production_relax_zero_budget(monkeypatch, aiida_code_installed) -> None
     assert outputs['report'].get_dict()['attempts'] == 0
     assert outputs['report'].get_dict()['status'] == 'exhausted'
     assert outputs['output_structure'].uuid == structure.uuid
+    for name in (
+        'output_parameters',
+        'output_trajectory',
+        'output_band',
+        'output_kpoints',
+        'output_atomic_occupations',
+        'remote_folder',
+    ):
+        assert name not in outputs
 
 
 def test_production_bands_seekpath(monkeypatch, aiida_code_installed) -> None:
@@ -566,3 +799,141 @@ def test_production_bands_explicit_kpoints(monkeypatch, aiida_code_installed) ->
     assert 'primitive_structure' not in outputs
     assert 'seekpath_parameters' not in outputs
     assert outputs['band_parameters'].get_dict()['number_of_bands'] == 8
+
+
+def test_require_base_finished_rejects_missing_status() -> None:
+    """A provided bands report without ``'status'`` fails instead of defaulting to finished."""
+    with pytest.raises(ValueError, match=r"carries no 'status'"):
+        run_get_node(require_base_finished, report=Dict({'attempts': 1}), stage='scf')
+
+
+def test_require_relax_base_rejects_missing_status() -> None:
+    """A provided initial-relax report without ``'status'`` fails loudly."""
+    with pytest.raises(ValueError, match=r"carries no 'status'"):
+        run_get_node(require_relax_base, report=Dict({'attempts': 1}))
+
+
+def test_require_relax_base_none_still_ok() -> None:
+    """An absent initial-relax report stays a no-op for backwards compatibility."""
+    _, node = run_get_node(require_relax_base, report=None)
+    assert node.is_finished_ok
+
+
+def test_prepare_next_relax_rejects_missing_status() -> None:
+    """A provided relax report without ``'status'`` fails instead of assuming finished."""
+    with pytest.raises(ValueError, match=r"carries no 'status'"):
+        run_get_node(
+            prepare_next_relax,
+            parameters=_vc_relax_parameters(),
+            output_parameters=Dict({'number_of_bands': 8}),
+            structure_before=_cubic(),
+            structure_after=_cubic(),
+            kpoints_distance=Float(0.5),
+            force_parity=False,
+            meta_convergence=True,
+            report=Dict({'attempts': 1}),
+            output_trajectory=None,
+        )
+
+
+def test_prepare_next_relax_none_report_still_finished() -> None:
+    """An absent relax report keeps the legacy finished default."""
+    outputs, node = run_get_node(
+        prepare_next_relax,
+        parameters=_vc_relax_parameters(),
+        output_parameters=Dict({'number_of_bands': 8}),
+        structure_before=_cubic(),
+        structure_after=_cubic(),
+        kpoints_distance=Float(0.5),
+        force_parity=False,
+        meta_convergence=False,
+        report=None,
+        output_trajectory=None,
+    )
+    assert node.is_finished_ok
+    assert outputs['rerun'].value is False
+
+
+def test_relax_init_use_main_inputs_default_and_build() -> None:
+    """Direct launches keep the ``True`` fallback default; both modes validate."""
+    import inspect
+
+    assert inspect.signature(pw_relax_graph).parameters['init_use_main_inputs'].default is True
+    assert pw_relax_graph.build() is None
+
+
+def test_resolve_init_inputs_falls_back_when_flag_set() -> None:
+    """With the default mode unset ``init_*`` resolve to copies of the main values."""
+    from aiida_quantumespresso.workflows.graphs.pw import resolve_init_inputs
+
+    outputs, node = run_get_node(
+        resolve_init_inputs,
+        parameters=Dict({'CONTROL': {'calculation': 'relax'}}),
+        settings=Dict({'cmdline': ['-nk', '2']}),
+        kpoints=None,
+        kpoints_distance=Float(0.15),
+        force_parity=True,
+        monitors=None,
+        init_use_main_inputs=True,
+        init_parameters=None,
+        init_settings=None,
+        init_kpoints=None,
+        init_kpoints_distance=None,
+        init_kpoints_force_parity=None,
+        init_monitors=None,
+    )
+    assert node.is_finished_ok
+    assert outputs['settings'].get_dict() == {'cmdline': ['-nk', '2']}
+    assert outputs['kpoints_distance'].value == pytest.approx(0.15)
+    assert outputs['force_parity'].value is True
+    assert 'kpoints' not in outputs
+    assert 'monitors' not in outputs
+
+
+def test_resolve_init_inputs_verbatim_when_flag_unset() -> None:
+    """Without inheritance an absent ``init_*`` stays absent instead of copying the main value."""
+    from aiida_quantumespresso.workflows.graphs.pw import resolve_init_inputs
+
+    outputs, node = run_get_node(
+        resolve_init_inputs,
+        parameters=Dict({'CONTROL': {'calculation': 'relax'}}),
+        settings=Dict({'cmdline': ['-nk', '2']}),
+        kpoints=None,
+        kpoints_distance=Float(0.15),
+        force_parity=True,
+        monitors=None,
+        init_use_main_inputs=False,
+        init_parameters=Dict({'CONTROL': {'calculation': 'relax'}}),
+        init_settings=None,
+        init_kpoints=None,
+        init_kpoints_distance=Float(0.3),
+        init_kpoints_force_parity=None,
+        init_monitors=None,
+    )
+    assert node.is_finished_ok
+    assert 'settings' not in outputs
+    assert outputs['kpoints_distance'].value == pytest.approx(0.3)
+    assert outputs['force_parity'].value is False
+
+
+def test_resolve_init_inputs_requires_parameters_when_flag_unset() -> None:
+    """Without inheritance a missing ``init_parameters`` fails loudly."""
+    from aiida_quantumespresso.workflows.graphs.pw import resolve_init_inputs
+
+    with pytest.raises(ValueError, match='`init_parameters` is required'):
+        run_get_node(
+            resolve_init_inputs,
+            parameters=Dict({'CONTROL': {'calculation': 'relax'}}),
+            settings=None,
+            kpoints=None,
+            kpoints_distance=None,
+            force_parity=False,
+            monitors=None,
+            init_use_main_inputs=False,
+            init_parameters=None,
+            init_settings=None,
+            init_kpoints=None,
+            init_kpoints_distance=None,
+            init_kpoints_force_parity=None,
+            init_monitors=None,
+        )

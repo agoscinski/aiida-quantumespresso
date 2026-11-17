@@ -22,7 +22,7 @@ subgraph with a ``@task`` stub (good orchestration coverage, not full
 integration); here the retry loop, rebinding, guards, and ``require_*``
 wiring all execute for real. The substitution reuses the ``CalcJob`` stub
 family from ``test_base.py`` by import and patches only
-``base.pw_calc`` (plus ``pdos.dos_calc`` / ``pdos.projwfc_calc`` for PDOS),
+``base.pw_calc``/``base.pw_calc_monitored`` (plus ``pdos.dos_calc`` / ``pdos.projwfc_calc`` for PDOS),
 resetting every compiled template that embeds those placements so the
 production bodies recompile against the substitutes. No production graph is
 copied here.
@@ -30,9 +30,10 @@ copied here.
 Scheduler options for the ``CalcJob`` placements travel at launch under
 ``task_metadata`` as a strictly nested mapping (one level per authored
 subgraph callee alias, the ``CalcJob`` placement alias at each leaf), not
-through graph inputs: ``{'scf': {'pw_calc': ...}, 'bands': {'pw_calc': ...}}``
-for bands, ``{'init_relax_guarded': {'initial': {'pw_calc': ...}}, 'main':
-{'pw_calc': ...}}`` for relax, and the ``scf`` plus stage scopes for PDOS.
+through graph inputs: ``{'scf': {'pw_calc': ..., 'pw_calc_monitored': ...}, 'bands': {...}}``
+for bands, ``{'init_relax_guarded': {'initial': {...}}, 'main': {...}}`` for relax
+(each ``pw`` leaf carries both ``pw_calc`` and ``pw_calc_monitored`` scopes),
+and the ``scf`` plus stage scopes for PDOS.
 """
 
 import io
@@ -233,8 +234,10 @@ def _patch_nested(monkeypatch, pw_stub=None, dos_stub=None, projwfc_stub=None) -
     reset (restored afterwards by ``monkeypatch``) to force recompilation.
     """
     if pw_stub is not None:
-        shaped = task(pw_stub, inputs={'monitors': DataDict}, errors=PwErrors)
-        monkeypatch.setattr(base_module, 'pw_calc', shaped)
+        plain = task(pw_stub, errors=PwErrors)
+        monitored = task(pw_stub, inputs={'monitors': {'stuck': Dict}}, errors=PwErrors)
+        monkeypatch.setattr(base_module, 'pw_calc', plain)
+        monkeypatch.setattr(base_module, 'pw_calc_monitored', monitored)
     if dos_stub is not None:
         monkeypatch.setattr(pdos_module, 'dos_calc', task(dos_stub))
     if projwfc_stub is not None:
@@ -321,8 +324,8 @@ def test_native_relax_converged_full_nesting(monkeypatch, aiida_code_installed) 
         meta_convergence=True,
         kpoints=_kpoints(),
         task_metadata={
-            'init_relax_guarded': {'initial': {'pw_calc': {'options': {}}}},
-            'main': {'pw_calc': {'options': {}}},
+            'init_relax_guarded': {'initial': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}}},
+            'main': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}},
         },
     )
     assert node.is_finished_ok, node.exit_message
@@ -349,8 +352,8 @@ def test_native_bands_seekpath_full_nesting(monkeypatch, aiida_code_installed) -
         scf_kpoints_distance=Float(0.5),
         bands_kpoints_distance=Float(0.3),
         task_metadata={
-            'scf': {'pw_calc': {'options': {}}},
-            'bands': {'pw_calc': {'options': {}}},
+            'scf': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}},
+            'bands': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}},
         },
     )
     assert node.is_finished_ok, node.exit_message
@@ -392,9 +395,9 @@ def test_native_pdos_serial_full_nesting_and_order(monkeypatch, aiida_code_insta
         nscf_kpoints_distance=Float(0.5),
         clean_workdir=True,
         task_metadata={
-            'scf': {'pw_calc': {'options': {}}},
+            'scf': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}},
             'pdos_stage_serial': {
-                'nscf': {'pw_calc': {'options': {}}},
+                'nscf': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}},
                 'dos_calc': {'options': {}},
                 'projwfc_calc': {'options': {}},
             },
@@ -437,8 +440,8 @@ def test_native_relax_output_identity(monkeypatch, aiida_code_installed) -> None
         max_iterations=5,
         kpoints=_kpoints(),
         task_metadata={
-            'init_relax_guarded': {'initial': {'pw_calc': {'options': {}}}},
-            'main': {'pw_calc': {'options': {}}},
+            'init_relax_guarded': {'initial': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}}},
+            'main': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}},
         },
     )
     assert node.is_finished_ok, node.exit_message

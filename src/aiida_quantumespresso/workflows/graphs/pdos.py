@@ -44,19 +44,24 @@ strictly nested mapping, not through graph inputs. Each authored subgraph
 callee alias adds one level; the ``CalcJob`` placement alias holds the normal
 metadata mapping at the leaf. The stage scopes nest the ``nscf`` base alias
 plus the ``dos_calc``/``projwfc_calc`` placements; a from-scratch root nests
-the ``scf`` base scope beside its stage scope::
+the ``scf`` base scope beside its stage scope. Each ``pw`` scope carries both
+static placements (``pw_calc`` unmonitored plus ``pw_calc_monitored``) with
+identical scheduler options::
 
     task_metadata = {
         'pdos_stage_serial': {
-            'nscf': {'pw_calc': {'options': nscf_options}},
+            'nscf': {'pw_calc': {'options': nscf_options},
+                     'pw_calc_monitored': {'options': nscf_options}},
             'dos_calc': {'options': dos_options},
             'projwfc_calc': {'options': projwfc_options},
         },
     }
     task_metadata = {
-        'scf': {'pw_calc': {'options': scf_options}},
+        'scf': {'pw_calc': {'options': scf_options},
+                'pw_calc_monitored': {'options': scf_options}},
         'pdos_stage_serial': {
-            'nscf': {'pw_calc': {'options': nscf_options}},
+            'nscf': {'pw_calc': {'options': nscf_options},
+                     'pw_calc_monitored': {'options': nscf_options}},
             'dos_calc': {'options': dos_options},
             'projwfc_calc': {'options': projwfc_options},
         },
@@ -70,8 +75,14 @@ mapping with :func:`task_metadata_for_options
 or as a literal nested mapping; unknown paths, missing entries, and
 non-mapping leaves fail loudly at launch.
 
-Honest limits of this rewrite (see ``reports/refinement-composites.md``):
+Honest limits of this rewrite (see ``reports/STATUS.md``):
 
+* PDOS outcome (implemented report statuses, not exact numeric root parity): both the SCF and the NSCF base runs must finish with report
+  status ``'finished'``. A considered-finished ``501``/``710`` outcome fails the
+  graph via :func:`require_pdos_base`, mirroring the legacy
+  ``inspect_scf``/``inspect_nscf`` ``is_finished_ok`` gates: the SCF guard
+  blocks NSCF dispatch in the from-scratch roots, and the NSCF guard blocks the
+  DOS/PROJWFC pair in both the serial and the parallel stages.
 * Graphs declare no exit codes: the legacy statuses (``401``-``404`` plus the
   restart ``301``/``302``/``401``/``402``) collapse into the single graph ``400
   ERROR_TASK_FAILED``. Stage attribution survives in the child exit statuses;
@@ -125,6 +136,7 @@ __all__ = (
     'pdos_stage',
     'pdos_stage_parallel',
     'pdos_stage_serial',
+    'require_pdos_base',
     'require_scf_parameters',
     'resolve_nscf_parameters',
     'resolve_post_windows',
@@ -176,6 +188,29 @@ class PdosFromScratchOutputs(PdosStageOutputs):
 
 class PdosFromParentOutputs(PdosStageOutputs):
     """Outputs of the from-parent roots: exactly the stage outputs (no SCF ran here)."""
+
+
+@task
+def require_pdos_base(report: Dict, stage: str) -> None:
+    """Fail when a base run the PDOS graph depends on did not fully converge.
+
+    Mirrors ``PdosWorkChain.inspect_scf``/``inspect_nscf``: both require
+    ``is_finished_ok``, so a considered-finished ``501``
+    (``finished_ionic_convergence_reached_except_final_scf``) or ``710``
+    (``finished_electronic_convergence_warning``) outcome must fail the graph
+    instead of flowing into the NSCF dispatch or the DOS/PROJWFC pair. A local
+    guard (rather than reusing ``pw.require_base_finished``) keeps the error in
+    the PDOS domain instead of naming the bands graph.
+
+    :param report: the ``report`` of the base run.
+    :param stage: ``'scf'`` or ``'nscf'``, naming the failed stage.
+    :raises ValueError: if the report status is not ``'finished'``.
+    """
+    status = report.get_dict().get('status')
+    if status != 'finished':
+        msg = f"The {stage} base run finished with status '{status}'; the pdos graph requires a fully converged run."
+        raise ValueError(msg)
+    return None
 
 
 @task
@@ -488,7 +523,12 @@ def pdos_stage_parallel(
         parent_folder=parent_folder,
         monitors=monitors,
     )
-    window = extract_nscf_window(output_parameters=nscf_run.output_parameters, output_band=nscf_run.output_band)
+    nscf_checked = require_pdos_base(report=nscf_run.report, stage='nscf')
+    window = extract_nscf_window(
+        output_parameters=nscf_run.output_parameters,
+        output_band=nscf_run.output_band,
+        after=nscf_checked,
+    )
     matched = resolve_post_windows(
         dos_parameters=dos_parameters,
         projwfc_parameters=projwfc_parameters,
@@ -610,7 +650,12 @@ def pdos_stage_serial(
         parent_folder=parent_folder,
         monitors=monitors,
     )
-    window = extract_nscf_window(output_parameters=nscf_run.output_parameters, output_band=nscf_run.output_band)
+    nscf_checked = require_pdos_base(report=nscf_run.report, stage='nscf')
+    window = extract_nscf_window(
+        output_parameters=nscf_run.output_parameters,
+        output_band=nscf_run.output_band,
+        after=nscf_checked,
+    )
     matched = resolve_post_windows(
         dos_parameters=dos_parameters,
         projwfc_parameters=projwfc_parameters,
@@ -741,6 +786,7 @@ def pdos_from_scratch_parallel(
         kpoints_distance=scf_kpoints_distance,
         monitors=scf_monitors if scf_monitors is not None else monitors,
     )
+    scf_checked = require_pdos_base(report=scf_run.report, stage='scf')
     stage = pdos_stage_parallel(
         structure=structure,
         parent_folder=scf_run.remote_folder,
@@ -762,6 +808,7 @@ def pdos_from_scratch_parallel(
         stages=2,
         clean_workdir=clean_workdir,
         monitors=nscf_monitors if nscf_monitors is not None else monitors,
+        after=scf_checked,
     )
     scf_final = sweep_remote(folder=scf_run.remote_folder, enabled=clean_workdir, after=stage)  # noqa: F841
     return {
@@ -856,6 +903,7 @@ def pdos_from_scratch_serial(
         kpoints_distance=scf_kpoints_distance,
         monitors=scf_monitors if scf_monitors is not None else monitors,
     )
+    scf_checked = require_pdos_base(report=scf_run.report, stage='scf')
     stage = pdos_stage_serial(
         structure=structure,
         parent_folder=scf_run.remote_folder,
@@ -877,6 +925,7 @@ def pdos_from_scratch_serial(
         stages=2,
         clean_workdir=clean_workdir,
         monitors=nscf_monitors if nscf_monitors is not None else monitors,
+        after=scf_checked,
     )
     scf_swept = sweep_remote(folder=scf_run.remote_folder, enabled=True, after=stage)
     scf_final = sweep_remote(folder=scf_run.remote_folder, enabled=clean_workdir, after=scf_swept)  # noqa: F841

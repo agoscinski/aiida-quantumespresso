@@ -27,19 +27,28 @@ Scheduler options are not graph inputs. The helper lifts every
 ``pw.metadata.options``/``dos.metadata.options``/``projwfc.metadata.options``
 section into the ``task_metadata`` launch mapping as a strictly nested mapping,
 and merges the ``options`` keyword into every placement. Each authored subgraph
-callee alias adds one level (for example ``{'scf': {'pw_calc': ...}, 'bands':
-{'pw_calc': ...}}`` for the bands root); the ``CalcJob`` placement alias holds
-the normal metadata mapping at the leaf. Branch and loop control frames are
+callee alias adds one level (for example ``{'scf': {'pw_calc': ..., 'pw_calc_monitored': ...},
+'bands': {...}}`` for the bands root); the ``CalcJob`` placement alias holds
+the normal metadata mapping at the leaf. Every ``pw`` scope carries both static placements
+(``pw_calc`` unmonitored plus ``pw_calc_monitored``) with identical scheduler options. Branch and loop control frames are
 transparent, and loop iterations reuse their placement's configuration, so no
 generated suffixes or per-iteration keys appear. The mapping covers every
 ``CalcJob`` placement exactly once: unknown paths, missing entries, and
 non-mapping leaves fail loudly at launch. See
-``reports/structured-metadata-migration.md`` for the scope contract and the
+``reports/STATUS.md`` for the scope contract and the
 authored aliases of each production root.
+
+The QE ``CONTROL.max_seconds`` cutoff is prepared per ``pw`` placement at launch:
+when the resolved ``CONTROL`` parameters carry no explicit ``max_seconds`` and the final
+``task_metadata`` leaf for that placement holds ``options.max_wallclock_seconds``, the helper
+seeds ``0.95`` of the wallclock (mirroring ``PwBaseWorkChain.prepare_process``); an explicit
+``max_seconds`` always wins and a placement without a wallclock gets no cutoff. The cutoff is
+constant across base-loop retries, matching the fixed scheduler options.
 
 Monitors travel as graph inputs, not scheduler options. Each ``pw.monitors``
 YAML section holds a mapping of monitor names onto ``{'entry_point': ...,
-'kwargs': {...}}`` entries; only the known ``quantumespresso.accuracy_stuck``
+'kwargs': {...}}`` entries; only the ``stuck`` monitor key with the known
+``quantumespresso.accuracy_stuck``
 entry point is accepted and unknown fields fail fast. The helper converts each
 entry into an ``orm.Dict`` collected in an ``orm.DataDict`` and forwards it
 into every nested base run through its authored alias (``scf``/``bands``,
@@ -53,17 +62,19 @@ What is deliberately not resolved (fail fast, never silently dropped):
   parallelization port.
 * An inner base ``max_iterations`` other than the graph default (5) is
   rejected; only the outer budget is exposed.
-* The relax graph shares one k-point mesh, one settings mapping, and one
-  ``kpoints_force_parity`` value between the initial and the main relax, while
-  their scheduler options resolve independently per scope (``initial`` versus
-  ``main``). Conflicting explicit overrides for the shared inputs are
-  rejected; the documented default (main mesh wins) applies otherwise.
+* The relax graph carries per-stage k-point meshes, settings mappings, and ``kpoints_force_parity``
+  values for the initial and the main relax. The graph defaults (``init_use_main_inputs=True``)
+  fall back to the main value when an ``init_*`` input is unset, preserving direct launches; the
+  protocol helper launches with ``init_use_main_inputs=False`` and passes each stage's independently
+  resolved values with no inheritance (an absent ``init_settings`` stays absent), while their scheduler
+  options resolve independently per scope (``initial`` versus ``main``).
 * ``RelaxType.VOLUME``/``POSITIONS_VOLUME`` and 2D structures outside the x-y
   plane are rejected, mirroring the legacy builder.
 """
 
 import copy
 import enum
+import math
 import pathlib
 import typing as t
 import warnings
@@ -127,11 +138,21 @@ _REJECTED_OVERRIDES = {
 #: The only monitor entry point the protocol helper wires structurally.
 _KNOWN_MONITOR_ENTRY_POINT = 'quantumespresso.accuracy_stuck'
 
+#: The only monitor key the native graphs wire into the ``CalcJob`` ``monitors`` namespace.
+_STUCK_MONITOR_KEY = 'stuck'
+
 #: Allowed kwargs of the known accuracy-stuck monitor.
 _KNOWN_MONITOR_KWARGS = frozenset({'min_repeats', 'structured'})
 
 #: The inner restart budget the native base graph always runs with.
 _BASE_MAX_ITERATIONS = 5
+
+#: Fraction of the scheduler wallclock reserved for the QE ``CONTROL.max_seconds`` cutoff.
+#: Mirrors ``PwBaseWorkChain.defaults.delta_factor_max_seconds``: the legacy ``prepare_process``
+#: sets ``max_seconds`` to this fraction of ``metadata.options.max_wallclock_seconds`` on every
+#: attempt when ``CONTROL.max_seconds`` is absent. The native graphs fix scheduler options at
+#: launch, so the launch helper prepares the same cutoff per CalcJob placement up front.
+_DELTA_FACTOR_MAX_SECONDS = 0.95
 
 #: Scheduler default resources follow the legacy builder per placement code.
 _DEFAULT_RESOURCES = (
@@ -300,6 +321,9 @@ def _check_allowed(mapping: dict, allowed: frozenset[str], where: str) -> None:
 
 def _coerce_monitor_entry(name: t.Any, value: t.Any, where: str) -> orm.Dict:
     """Validate one monitor entry and return it as an unstored ``Dict``."""
+    if str(name) != _STUCK_MONITOR_KEY:
+        msg = f'`{where}.{name}` is not supported; only the `{_STUCK_MONITOR_KEY}` monitor key is wired structurally.'
+        raise ValueError(msg)
     if not isinstance(value, (dict, orm.Dict)):
         msg = f'`{where}.{name}` must map to a monitor mapping, got `{type(value).__name__}`.'
         raise ValueError(msg)
@@ -326,9 +350,14 @@ def _coerce_monitor_entry(name: t.Any, value: t.Any, where: str) -> orm.Dict:
         if key not in _KNOWN_MONITOR_KWARGS:
             msg = f'`{where}.{name}.kwargs.{key}` is not supported; expected one of {sorted(_KNOWN_MONITOR_KWARGS)}.'
             raise ValueError(msg)
-    if 'min_repeats' in kwargs and not isinstance(kwargs['min_repeats'], int):
-        msg = f'`{where}.{name}.kwargs.min_repeats` must be an `int`, got `{type(kwargs["min_repeats"]).__name__}`.'
-        raise ValueError(msg)
+    if 'min_repeats' in kwargs:
+        min_repeats = kwargs['min_repeats']
+        if isinstance(min_repeats, bool) or not isinstance(min_repeats, int):
+            msg = f'`{where}.{name}.kwargs.min_repeats` must be an `int`, got `{type(min_repeats).__name__}`.'
+            raise ValueError(msg)
+        if min_repeats <= 0:
+            msg = f'`{where}.{name}.kwargs.min_repeats` must be positive, got `{min_repeats!r}`.'
+            raise ValueError(msg)
     if 'structured' in kwargs and not isinstance(kwargs['structured'], bool):
         msg = f'`{where}.{name}.kwargs.structured` must be a `bool`, got `{type(kwargs["structured"]).__name__}`.'
         raise ValueError(msg)
@@ -358,12 +387,13 @@ def _coerce_monitors_input(value: t.Any, name: str) -> orm.DataDict | None:
     if value is None:
         return None
     if isinstance(value, orm.DataDict):
+        normalized = {}
         for label, node in value.items():
             if not isinstance(node, orm.Dict):
                 msg = f'`{name}[{label!r}]` must be a `Dict`, got `{type(node).__name__}`.'
                 raise ValueError(msg)
-            _coerce_monitor_entry(label, node, name)
-        return value
+            normalized[label] = _coerce_monitor_entry(label, node, name)
+        return orm.DataDict(normalized)
     if isinstance(value, dict):
         if not value:
             return None
@@ -660,15 +690,120 @@ def _placement_metadata(section_options: dict, global_options: dict | None, code
     return {'options': merged}
 
 
+def _pw_scope_metadata(section_options: dict, global_options: dict | None, code: orm.Code | None) -> dict:
+    """Return the scheduler metadata for one ``pw`` scope with both static placements in sync.
+
+    The native ``pw_base_graph`` branches over a plain ``pw_calc`` placement (no monitor
+    inputs) and a monitored ``pw_calc_monitored`` placement (static ``monitors.stuck``).
+    Core validates every reachable ``CalcJob`` leaf, so both placements need a leaf each
+    carrying the same scheduler options; the monitor branch never changes the wallclock.
+    """
+    metadata = _placement_metadata(section_options, global_options, code)
+    return {'pw_calc': metadata, 'pw_calc_monitored': copy.deepcopy(metadata)}
+
+
+def _duplicate_pw_leaves(node: t.Any, _path: str = 'task_metadata') -> t.Any:
+    """Duplicate a single-sided ``pw_calc``/``pw_calc_monitored`` override onto its sibling.
+
+    Explicit ``task_metadata`` overrides name one leaf per scope; without duplication the
+    sibling would keep the protocol default and the two placements would desynchronize.
+    Scopes stay independent: only leaves under the same parent are synchronized.
+
+    Both leaves present with different mappings is an actionable error: the placements
+    are mutually exclusive representations of the same run and must carry identical
+    scheduler options, so silently keeping divergent leaves would drop one explicit
+    override. Pass a single-sided override (it is duplicated onto its sibling) or
+    repeat the same mapping on both leaves.
+    """
+    if not isinstance(node, dict):
+        return node
+    duplicated = {key: _duplicate_pw_leaves(value, f'{_path}.{key}') for key, value in node.items()}
+    has_plain = 'pw_calc' in duplicated
+    has_monitored = 'pw_calc_monitored' in duplicated
+    if has_plain and has_monitored:
+        if duplicated['pw_calc'] != duplicated['pw_calc_monitored']:
+            msg = (
+                f'`{_path}` holds conflicting `pw_calc` and `pw_calc_monitored` metadata: the two '
+                'placements are mutually exclusive representations of the same run and must carry '
+                'identical scheduler options. Pass a single-sided override (it is duplicated onto '
+                'its sibling) or repeat the same mapping on both leaves.'
+            )
+            raise ValueError(msg)
+    elif has_plain ^ has_monitored:
+        source = duplicated['pw_calc'] if has_plain else duplicated['pw_calc_monitored']
+        target = 'pw_calc_monitored' if has_plain else 'pw_calc'
+        duplicated[target] = copy.deepcopy(source)
+    return duplicated
+
+
+def _placement_options(task_metadata: dict | None, *path: str) -> dict:
+    """Return the scheduler ``options`` leaf of a merged ``task_metadata`` mapping at one placement path."""
+    node: t.Any = task_metadata or {}
+    for key in path:
+        if not isinstance(node, dict):
+            return {}
+        node = node.get(key, {})
+    if not isinstance(node, dict):
+        return {}
+    options = node.get('options', {})
+    return dict(options) if isinstance(options, dict) else {}
+
+
+def _ensure_max_seconds(parameters: dict, options: dict | None, *, where: str = 'placement') -> dict:
+    """Derive ``CONTROL.max_seconds`` from a fixed scheduler wallclock, preserving an explicit value.
+
+    Mirrors ``PwBaseWorkChain.prepare_process`` without per-attempt scheduler metadata: when
+    ``CONTROL.max_seconds`` is already set (YAML default, caller override) it wins; otherwise a
+    present ``options['max_wallclock_seconds']`` seeds ``0.95`` of itself so the QE cutoff stops
+    the SCF loop just before the scheduler kills the job. No wallclock means no cutoff.
+
+    A present but non-numeric wallclock is an actionable error, not a silent no-op: the
+    ``CalcJob`` spec requires ``metadata.options.max_wallclock_seconds`` to be an ``int``,
+    so an invalid limit would fail loudly at launch while a silently skipped cutoff would
+    leave the run without the QE stop that the wallclock promised.
+    """
+    control = parameters.setdefault('CONTROL', {})
+    if 'max_seconds' in control:
+        return parameters
+    if not options:
+        return parameters
+    wallclock = options.get('max_wallclock_seconds')
+    if wallclock is None:
+        return parameters
+    if isinstance(wallclock, bool):
+        msg = (
+            f'`{where}` holds `max_wallclock_seconds={wallclock!r}`: the wallclock must be a '
+            'positive number of seconds, matching `metadata.options.max_wallclock_seconds`.'
+        )
+        raise ValueError(msg)
+    try:
+        wallclock_value = float(wallclock)
+    except (TypeError, ValueError):
+        msg = (
+            f'`{where}` holds `max_wallclock_seconds={wallclock!r}`: the wallclock must be a '
+            'positive number of seconds, matching `metadata.options.max_wallclock_seconds`.'
+        )
+        raise ValueError(msg) from None
+    if not math.isfinite(wallclock_value) or wallclock_value <= 0:
+        msg = (
+            f'`{where}` holds `max_wallclock_seconds={wallclock!r}`: the wallclock must be a '
+            'positive number of seconds, matching `metadata.options.max_wallclock_seconds`.'
+        )
+        raise ValueError(msg)
+    control['max_seconds'] = wallclock_value * _DELTA_FACTOR_MAX_SECONDS
+    return parameters
+
+
 def _apply_relax_type(
     *,
     parameters: dict,
     init_parameters: dict,
     settings: dict | None,
+    init_settings: dict | None,
     structure: orm.StructureData,
     relax_type: RelaxType,
-) -> dict | None:
-    """Map a relax type onto calculation modes, cell constraints, and fixed coordinates."""
+) -> tuple[dict | None, dict | None]:
+    """Map a relax type onto calculation modes, cell constraints, and fixed coordinates per stage."""
     if relax_type in (RelaxType.VOLUME, RelaxType.POSITIONS_VOLUME):
         msg = f'relax type `{relax_type.value}` is not supported.'
         raise ValueError(msg)
@@ -704,10 +839,14 @@ def _apply_relax_type(
     if init_parameters['CONTROL']['calculation'] == 'scf':
         init_parameters.pop('CELL', None)
     if relax_type in (RelaxType.VOLUME, RelaxType.SHAPE, RelaxType.CELL):
-        fixed = dict(settings) if settings is not None else {}
-        fixed['FIXED_COORDS'] = [[True, True, True]] * len(structure.sites)
-        return fixed
-    return settings
+
+        def _with_fixed(mapping: dict | None) -> dict:
+            fixed = dict(mapping) if mapping is not None else {}
+            fixed['FIXED_COORDS'] = [[True, True, True]] * len(structure.sites)
+            return fixed
+
+        return _with_fixed(settings), _with_fixed(init_settings)
+    return settings, init_settings
 
 
 def _as_nodes(*, parameters: dict, settings: dict | None, distance: float | None) -> tuple:
@@ -737,6 +876,7 @@ def get_inputs_from_protocol(
     initial_magnetic_moments: dict | None = None,
     relax_type: RelaxType | str = RelaxType.POSITIONS_CELL,
     kpoints: orm.KpointsData | None = None,
+    init_kpoints: orm.KpointsData | None = None,
     scf_kpoints: orm.KpointsData | None = None,
     bands_kpoints: orm.KpointsData | None = None,
     nscf_kpoints: orm.KpointsData | None = None,
@@ -779,7 +919,8 @@ def get_inputs_from_protocol(
     :param spin_type: the requested ``SpinType``; resolved through :func:`get_magnetization`.
     :param initial_magnetic_moments: per-kind initial moments for spin-polarized runs.
     :param relax_type: the ``RelaxType`` for ``'pw_relax'``.
-    :param kpoints: explicit mesh shared by the relax run.
+    :param kpoints: explicit mesh for the main relax run; never overwrites the initial density.
+    :param init_kpoints: explicit mesh for the initial relax run, if any.
     :param scf_kpoints: explicit SCF mesh for ``'pw_bands'`` or ``'pdos'``.
     :param bands_kpoints: explicit bands path for ``'pw_bands'``; conflicts with the protocol distance.
     :param nscf_kpoints: explicit NSCF mesh for ``'pdos'``.
@@ -834,6 +975,7 @@ def get_inputs_from_protocol(
     explicit_pseudos = _normalize_pseudos(pseudos, structure) if pseudos is not None else None
     for label, nodes in (
         ('kpoints', kpoints),
+        ('init_kpoints', init_kpoints),
         ('scf_kpoints', scf_kpoints),
         ('bands_kpoints', bands_kpoints),
         ('nscf_kpoints', nscf_kpoints),
@@ -865,6 +1007,7 @@ def get_inputs_from_protocol(
             initial_magnetic_moments=initial_magnetic_moments,
             relax_type=_as_enum(relax_type, RelaxType, 'relax_type'),
             kpoints=kpoints,
+            init_kpoints=init_kpoints,
             options=options,
             task_metadata=task_metadata,
             monitors=_coerce_monitors_input(monitors, 'monitors'),
@@ -959,7 +1102,14 @@ def _resolve_sections(
 
 
 def _merge_task_metadata(*mappings: dict | None) -> dict:
-    """Merge placement metadata mappings left to right, with the rightmost winning."""
+    """Merge placement metadata mappings left to right, with the rightmost winning.
+
+    Single-sided ``pw_calc``/``pw_calc_monitored`` overrides are duplicated onto
+    their sibling before merging, so the two static placements stay synchronized
+    while independent scopes resolve independently. Conflicting sibling leaves in
+    any single mapping fail fast instead of desynchronizing the placements, and
+    the merged result is rechecked so a conflict can never slip through.
+    """
     merged: dict[str, dict] = {}
     for mapping in mappings:
         if mapping is None:
@@ -967,11 +1117,13 @@ def _merge_task_metadata(*mappings: dict | None) -> dict:
         if not isinstance(mapping, dict):
             msg = '`task_metadata` must be a mapping of authored placement names.'
             raise ValueError(msg)
+        mapping = _duplicate_pw_leaves(mapping)
         for placement, metadata in mapping.items():
             if not isinstance(metadata, dict):
                 msg = f'`task_metadata.{placement}` must be a mapping.'
                 raise ValueError(msg)
             merged[placement] = _recursive_merge(merged.get(placement, {}), copy.deepcopy(metadata))
+    _duplicate_pw_leaves(merged)
     return merged
 
 
@@ -989,6 +1141,7 @@ def _relax_launch_inputs(
     initial_magnetic_moments: dict | None,
     relax_type: RelaxType,
     kpoints: orm.KpointsData | None,
+    init_kpoints: orm.KpointsData | None,
     options: dict | None,
     task_metadata: dict | None,
     monitors: orm.DataDict | None = None,
@@ -1017,47 +1170,60 @@ def _relax_launch_inputs(
     )
     main, init = sections['base_relax'], sections['base_init_relax']
 
-    init_distance_raw = (raw_overrides.get('base_init_relax') or {}).get('kpoints_distance')
-    if init_distance_raw is not None and init_distance_raw != main['kpoints_distance']:
-        msg = (
-            '`base_init_relax.kpoints_distance` cannot differ from the main mesh: the native relax graph '
-            'shares one `kpoints_distance` between the initial and the main relax.'
-        )
-        raise ValueError(msg)
-    if init['settings'] is not None and main['settings'] is not None and init['settings'] != main['settings']:
-        msg = 'base sections resolve different `settings` but the native relax graph shares one `settings` input.'
-        raise ValueError(msg)
-    if init['kpoints_force_parity'] != main['kpoints_force_parity']:
-        msg = 'base sections resolve different `kpoints_force_parity` but the native relax graph shares one input.'
-        raise ValueError(msg)
-
-    settings = _apply_relax_type(
+    settings, init_settings = _apply_relax_type(
         parameters=main['parameters'],
         init_parameters=init['parameters'],
-        settings=main['settings'] if main['settings'] is not None else init['settings'],
+        settings=main['settings'],
+        init_settings=init['settings'],
         structure=structure,
         relax_type=relax_type,
     )
+    task_metadata_final = _merge_task_metadata(
+        {
+            'init_relax_guarded': {'initial': _pw_scope_metadata(init['metadata_options'], options, protocol_code)},
+            'main': _pw_scope_metadata(main['metadata_options'], options, protocol_code),
+        },
+        task_metadata,
+    )
+    _ensure_max_seconds(
+        main['parameters'], _placement_options(task_metadata_final, 'main', 'pw_calc'), where='main.pw_calc'
+    )
+    _ensure_max_seconds(
+        init['parameters'],
+        _placement_options(task_metadata_final, 'init_relax_guarded', 'initial', 'pw_calc'),
+        where='init_relax_guarded.initial.pw_calc',
+    )
     parameters, settings_node, distance_node = _as_nodes(
         parameters=main['parameters'], settings=settings, distance=main['kpoints_distance']
+    )
+    _, init_settings_node, init_distance_node = _as_nodes(
+        parameters=init['parameters'], settings=init_settings, distance=init['kpoints_distance']
     )
     launch: dict[str, t.Any] = {
         'structure': structure,
         'parameters': parameters,
         'init_parameters': orm.Dict(init['parameters']),
         'run_init_relax': True,
+        'init_use_main_inputs': False,
         'code': protocol_code,
         'pseudos': orm.DataDict(main['pseudos']),
         'max_iterations': int(merged.get('max_meta_convergence_iterations', 5)),
         'meta_convergence': bool(merged.get('meta_convergence', True)),
         'kpoints_force_parity': main['kpoints_force_parity'],
+        'init_kpoints_force_parity': init['kpoints_force_parity'],
     }
     if kpoints is not None:
         launch['kpoints'] = kpoints
     elif distance_node is not None:
         launch['kpoints_distance'] = distance_node
+    if init_kpoints is not None:
+        launch['init_kpoints'] = init_kpoints
+    elif init_distance_node is not None:
+        launch['init_kpoints_distance'] = init_distance_node
     if settings_node is not None:
         launch['settings'] = settings_node
+    if init_settings_node is not None:
+        launch['init_settings'] = init_settings_node
     shared = monitors
     yaml_main = main['monitors']
     yaml_init = init['monitors']
@@ -1070,17 +1236,9 @@ def _relax_launch_inputs(
         eff_init = yaml_init
     if eff_main is not None:
         launch['monitors'] = eff_main
-    if eff_init is not None and (eff_init is not eff_main):
+    if eff_init is not None:
         launch['init_monitors'] = eff_init
-    launch['task_metadata'] = _merge_task_metadata(
-        {
-            'init_relax_guarded': {
-                'initial': {'pw_calc': _placement_metadata(init['metadata_options'], options, protocol_code)}
-            },
-            'main': {'pw_calc': _placement_metadata(main['metadata_options'], options, protocol_code)},
-        },
-        task_metadata,
-    )
+    launch['task_metadata'] = task_metadata_final
     return launch
 
 
@@ -1137,6 +1295,21 @@ def _bands_launch_inputs(
         msg = 'Cannot specify both `bands_kpoints` and `bands_kpoints_distance`.'
         raise ValueError(msg)
 
+    scf_metadata = _pw_scope_metadata(scf['metadata_options'], options, scf_code)
+    bands_metadata = _pw_scope_metadata(bands['metadata_options'], options, bands_code)
+    task_metadata_final = _merge_task_metadata(
+        {
+            'scf': scf_metadata,
+            'bands': bands_metadata,
+        },
+        task_metadata,
+    )
+    _ensure_max_seconds(
+        scf['parameters'], _placement_options(task_metadata_final, 'scf', 'pw_calc'), where='scf.pw_calc'
+    )
+    _ensure_max_seconds(
+        bands['parameters'], _placement_options(task_metadata_final, 'bands', 'pw_calc'), where='bands.pw_calc'
+    )
     scf_parameters, scf_settings, scf_distance = _as_nodes(
         parameters=scf['parameters'], settings=scf['settings'], distance=scf['kpoints_distance']
     )
@@ -1182,15 +1355,7 @@ def _bands_launch_inputs(
                 launch['scf_monitors'] = eff_scf
             if eff_bands is not None:
                 launch['bands_monitors'] = eff_bands
-    scf_metadata = _placement_metadata(scf['metadata_options'], options, scf_code)
-    bands_metadata = _placement_metadata(bands['metadata_options'], options, bands_code)
-    launch['task_metadata'] = _merge_task_metadata(
-        {
-            'scf': {'pw_calc': scf_metadata},
-            'bands': {'pw_calc': bands_metadata},
-        },
-        task_metadata,
-    )
+    launch['task_metadata'] = task_metadata_final
     return launch
 
 
@@ -1316,10 +1481,8 @@ def _pdos_launch_inputs(
         launch['dos_settings'] = orm.Dict(dos['settings'])
     if projwfc['settings'] is not None:
         launch['projwfc_settings'] = orm.Dict(projwfc['settings'])
-    scf_options = (
-        _placement_metadata(sections['scf']['metadata_options'], options, pw_code) if not from_parent else None
-    )
-    nscf_metadata = _placement_metadata(nscf['metadata_options'], options, pw_code)
+    scf_options = _pw_scope_metadata(sections['scf']['metadata_options'], options, pw_code) if not from_parent else None
+    nscf_metadata = _pw_scope_metadata(nscf['metadata_options'], options, pw_code)
     dos_metadata = _placement_metadata(dos['metadata_options'], options, dos_code)
     projwfc_metadata = _placement_metadata(projwfc['metadata_options'], options, projwfc_code)
     yaml_scf_monitors = sections['scf']['monitors'] if not from_parent else None
@@ -1350,14 +1513,28 @@ def _pdos_launch_inputs(
             if eff_nscf is not None:
                 launch['nscf_monitors'] = eff_nscf
     stage_metadata: dict = {
-        'nscf': {'pw_calc': nscf_metadata},
+        'nscf': nscf_metadata,
         'dos_calc': dos_metadata,
         'projwfc_calc': projwfc_metadata,
     }
     hierarchical = {stage: stage_metadata}
     if not from_parent:
-        hierarchical['scf'] = {'pw_calc': scf_options}
-    launch['task_metadata'] = _merge_task_metadata(hierarchical, task_metadata)
+        hierarchical['scf'] = scf_options
+    task_metadata_final = _merge_task_metadata(hierarchical, task_metadata)
+    _ensure_max_seconds(
+        nscf['parameters'],
+        _placement_options(task_metadata_final, stage, 'nscf', 'pw_calc'),
+        where=f'{stage}.nscf.pw_calc',
+    )
+    launch['nscf_parameters'] = orm.Dict(nscf['parameters'])
+    if not from_parent:
+        _ensure_max_seconds(
+            sections['scf']['parameters'],
+            _placement_options(task_metadata_final, 'scf', 'pw_calc'),
+            where='scf.pw_calc',
+        )
+        launch['scf_parameters'] = orm.Dict(sections['scf']['parameters'])
+    launch['task_metadata'] = task_metadata_final
     return launch
 
 

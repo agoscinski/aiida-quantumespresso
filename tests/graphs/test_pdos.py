@@ -56,6 +56,7 @@ from aiida_quantumespresso.workflows.graphs.pdos import (
     pdos_from_scratch_serial,
     pdos_stage_parallel,
     pdos_stage_serial,
+    require_pdos_base,
     require_scf_parameters,
     resolve_nscf_parameters,
     resolve_post_windows,
@@ -141,6 +142,7 @@ class StubPwOutputs(t.TypedDict):
     output_parameters: Dict
     output_band: BandsData
     remote_folder: RemoteData
+    report: Dict
 
 
 class StubDosOutputs(t.TypedDict):
@@ -193,6 +195,7 @@ def stub_pw_base(
         'output_parameters': Dict({'number_of_bands': nbnd, 'number_of_electrons': 8, 'fermi_energy': 6.9}),
         'output_band': bands,
         'remote_folder': _stub_remote('/tmp/stub-pw'),
+        'report': Dict({'attempts': 1, 'status': 'finished'}),
     }
 
 
@@ -346,13 +349,19 @@ def test_stage_scopes_follow_authored_aliases() -> None:
     """The compiled PDOS stages address NSCF/DOS/PROJWFC through authored aliases.
 
     The checks compile the production graphs themselves (no copies): the NSCF
-    base run descends through the ``nscf`` alias to the shared ``pw_calc``
-    leaf, the post-processing placements keep their stable names, and no
-    placement calls ``pw_base_graph`` directly or carries a generated suffix.
+    base run descends through the ``nscf`` alias to the shared
+    ``pw_calc``/``pw_calc_monitored`` leaves, the post-processing placements keep
+    their stable names, and no placement calls ``pw_base_graph`` directly or carries
+    a generated suffix.
     """
     from aiida.engine.processes.graphs.lowering import compile_graph
 
-    expected_stage = {('nscf', 'pw_calc'), ('dos_calc',), ('projwfc_calc',)}
+    expected_stage = {
+        ('nscf', 'pw_calc'),
+        ('nscf', 'pw_calc_monitored'),
+        ('dos_calc',),
+        ('projwfc_calc',),
+    }
     assert _calcjob_paths(compile_graph(pdos_stage_parallel)) == expected_stage
     assert _calcjob_paths(compile_graph(pdos_stage_serial)) == expected_stage
 
@@ -361,17 +370,23 @@ def test_roots_nest_stage_beside_scf_scope() -> None:
     """The compiled from-scratch roots nest the stage scope beside the SCF scope.
 
     The from-parent roots carry only the stage scope. Both variants address
-    every ``CalcJob`` placement exactly once with no generated suffixes.
+    every ``CalcJob`` placement exactly once per monitor shape with no generated suffixes.
     """
     from aiida.engine.processes.graphs.lowering import compile_graph
 
-    expected_stage = {('nscf', 'pw_calc'), ('dos_calc',), ('projwfc_calc',)}
+    expected_stage = {
+        ('nscf', 'pw_calc'),
+        ('nscf', 'pw_calc_monitored'),
+        ('dos_calc',),
+        ('projwfc_calc',),
+    }
     for root, stage in (
         (pdos_from_scratch_parallel, 'pdos_stage_parallel'),
         (pdos_from_scratch_serial, 'pdos_stage_serial'),
     ):
         assert _calcjob_paths(compile_graph(root)) == {
             ('scf', 'pw_calc'),
+            ('scf', 'pw_calc_monitored'),
             *[(stage, *path) for path in expected_stage],
         }
     for root, stage in (
@@ -389,6 +404,45 @@ def test_serial_stage_orders_dos_before_projwfc() -> None:
     assert ('sweep_remote', 'projwfc_calc') not in parallel_edges
     serial_edges = {(edge.source, edge.target) for edge in compile_graph(pdos_stage_serial).dependencies}
     assert ('sweep_remote', 'projwfc_calc') in serial_edges
+
+
+@pytest.mark.parametrize('stage', ['scf', 'nscf'])
+@pytest.mark.parametrize(
+    'status',
+    ['finished_ionic_convergence_reached_except_final_scf', 'finished_electronic_convergence_warning'],
+)
+def test_require_pdos_base_rejects_considered_finished(stage, status) -> None:
+    """A considered-finished ``501``/``710`` report fails the PDOS guard, mirroring ``is_finished_ok``."""
+    with pytest.raises(ValueError, match=f'The {stage} base run.*pdos graph requires'):
+        run_get_node(require_pdos_base, report=Dict({'attempts': 1, 'status': status}), stage=stage)
+
+
+@pytest.mark.parametrize('stage', ['scf', 'nscf'])
+def test_require_pdos_base_finished(stage) -> None:
+    """A fully converged base report passes the PDOS guard."""
+    _, node = run_get_node(require_pdos_base, report=Dict({'attempts': 1, 'status': 'finished'}), stage=stage)
+    assert node.is_finished_ok
+
+
+def test_stage_guards_nscf_before_window() -> None:
+    """Both stages order the NSCF guard before the window extraction, blocking DOS/PROJWFC on failure."""
+    from aiida.engine.processes.graphs.lowering import compile_graph
+
+    for target in (pdos_stage_parallel, pdos_stage_serial):
+        edges = {(edge.source, edge.target) for edge in compile_graph(target).dependencies}
+        assert ('require_pdos_base', 'extract_nscf_window') in edges
+
+
+def test_roots_guard_scf_before_stage() -> None:
+    """Both from-scratch roots order the SCF guard before the stage, blocking NSCF dispatch on failure."""
+    from aiida.engine.processes.graphs.lowering import compile_graph
+
+    for root, stage in (
+        (pdos_from_scratch_parallel, 'pdos_stage_parallel'),
+        (pdos_from_scratch_serial, 'pdos_stage_serial'),
+    ):
+        edges = {(edge.source, edge.target) for edge in compile_graph(root).dependencies}
+        assert ('require_pdos_base', stage) in edges
 
 
 def test_require_scf_parameters() -> None:

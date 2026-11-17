@@ -216,6 +216,11 @@ def test_launch_relax_explicit_pseudos(aiida_code_installed, generate_upf_data) 
     assert (
         launch['task_metadata']['init_relax_guarded']['initial']['pw_calc']['options']['max_wallclock_seconds'] == 43200
     )
+    assert launch['task_metadata']['main']['pw_calc_monitored'] == launch['task_metadata']['main']['pw_calc']
+    assert (
+        launch['task_metadata']['init_relax_guarded']['initial']['pw_calc_monitored']
+        == launch['task_metadata']['init_relax_guarded']['initial']['pw_calc']
+    )
 
 
 def test_launch_relax_init_main_options_resolve_per_scope(monkeypatch, aiida_code_installed, generate_upf_data) -> None:
@@ -235,6 +240,11 @@ def test_launch_relax_init_main_options_resolve_per_scope(monkeypatch, aiida_cod
     task_metadata = launch['task_metadata']
     assert task_metadata['init_relax_guarded']['initial']['pw_calc']['options']['max_wallclock_seconds'] == 1111
     assert task_metadata['main']['pw_calc']['options']['max_wallclock_seconds'] == 2222
+    assert task_metadata['main']['pw_calc_monitored'] == task_metadata['main']['pw_calc']
+    assert (
+        task_metadata['init_relax_guarded']['initial']['pw_calc_monitored']
+        == task_metadata['init_relax_guarded']['initial']['pw_calc']
+    )
     _, root = run_get_node(pw_relax_graph, **launch)
     assert root.is_finished_ok, root.exit_message
     children = sorted(_pw_calcs(root), key=lambda child: child.ctime)
@@ -400,8 +410,9 @@ def test_launch_bands_inputs(aiida_code_installed) -> None:
     task_metadata = launch['task_metadata']
     assert set(task_metadata) == {'scf', 'bands'}
     for scope in ('scf', 'bands'):
-        assert set(task_metadata[scope]) == {'pw_calc'}
+        assert set(task_metadata[scope]) == {'pw_calc', 'pw_calc_monitored'}
         assert task_metadata[scope]['pw_calc']['options']['max_wallclock_seconds'] == 43200
+        assert task_metadata[scope]['pw_calc_monitored'] == task_metadata[scope]['pw_calc']
 
 
 def test_launch_bands_kpoints_conflict(aiida_code_installed) -> None:
@@ -443,9 +454,14 @@ def test_launch_pdos_inputs(aiida_code_installed) -> None:
     assert launch['dos_parameters'].get_dict()['DOS']['deltae'] == pytest.approx(0.01)
     task_metadata = launch['task_metadata']
     assert set(task_metadata) == {'scf', 'pdos_stage_parallel'}
-    assert set(task_metadata['scf']) == {'pw_calc'}
+    assert set(task_metadata['scf']) == {'pw_calc', 'pw_calc_monitored'}
     assert set(task_metadata['pdos_stage_parallel']) == {'nscf', 'dos_calc', 'projwfc_calc'}
-    assert set(task_metadata['pdos_stage_parallel']['nscf']) == {'pw_calc'}
+    assert set(task_metadata['pdos_stage_parallel']['nscf']) == {'pw_calc', 'pw_calc_monitored'}
+    assert task_metadata['scf']['pw_calc_monitored'] == task_metadata['scf']['pw_calc']
+    assert (
+        task_metadata['pdos_stage_parallel']['nscf']['pw_calc_monitored']
+        == task_metadata['pdos_stage_parallel']['nscf']['pw_calc']
+    )
     for leaf in (
         task_metadata['scf']['pw_calc'],
         task_metadata['pdos_stage_parallel']['nscf']['pw_calc'],
