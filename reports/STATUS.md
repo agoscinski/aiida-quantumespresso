@@ -98,6 +98,23 @@ These are report-status contracts, **not exact legacy numeric root exit codes**.
   bands, k-points, and occupations when present, preserving output-node identity.
   With zero iterations these optional outputs are absent; structure/report remain.
 
+### PH recover-chain outputs
+
+PH now folds recover outputs inside the production graph using the existing merge
+mathematics. Each merge links the previous aggregate and the current original
+parameter node directly; no container copies detach the inputs. Scratch restarts
+reset the aggregate. Multi-run chains reject missing outputs or incomplete
+requested q-point ranges. Single runs and initialization-only runs return the
+original output node, and the last remote folder is exposed.
+
+This creates a linear chain of pairwise merge calculations instead of the legacy
+single N-way merge calculation. Original outputs remain reachable through normal
+provenance links. External post-termination merge helpers remain available.
+
+Review also corrected the PH recovery latch and omitted-settings preparation:
+retry parameters now reflect the legacy `prepare_process` recovery behavior, and
+omitting optional settings no longer returns an invalid absent task output.
+
 ### Legacy/core-3 compatibility
 
 PW/PH protocol builders use the supported `orm.Code` base. Pseudo-family test
@@ -116,8 +133,11 @@ Independent targeted checks on the combined working tree:
   passed (4.53 seconds).
 - 12 selected outcome-classification, monitor-boundary, and protocol validation
   checks passed (3.71 seconds).
-- QE's configured Ruff lint/format pre-commit hooks passed on all changed Python
-  files and the new protocol-parity tests after formatting.
+- 3 selected PH production-recover, pairwise-merge provenance, and scratch-reset
+  regressions passed (15.88 seconds), with only the external calculation replaced.
+  The production-recover test omits settings to cover the default-input fix.
+- QE's configured Ruff lint/format pre-commit hooks passed on the initial parity
+  checkpoint; subsequent PH changes are checked separately before committing.
 
 Workers also ran focused unit/build subsets. An earlier worker reported 198
 legacy workflow tests passed, 1 skipped, before long runs were deferred. That is
@@ -127,12 +147,12 @@ executable, or remote-scheduler equivalence is claimed.
 ## Remaining work before parity
 
 1. Complete exposed outputs and optional phases, especially PDOS's legacy
-   namespaced/full output contract and bands' optional relaxation phase. Do not
-   add side-products to bands merely for symmetry: its legacy public result is
-   the five named bands/SCF/path outputs, already represented natively.
-2. Complete PH recovery-chain result ownership and merged parameters. Existing
-   helpers merge original stored nodes with direct provenance links after graph
-   termination; that does not replace the graph's stored last-run output.
+   namespaced/full output contract. Do not add side-products or a relaxation phase
+   to bands merely for symmetry: the current legacy implementation has no such
+   phase and its five named bands/SCF/path outputs are represented natively.
+2. Broaden PH production recovery coverage (multiple recoveries, scratch reset,
+   missing/incomplete outputs) and account explicitly for the pairwise provenance
+   difference. Parent-derived structure/q-point preparation remains incomplete.
 3. Define the caller-owned execution/finalization interface for cleanup after
    success, failure, and cancellation. `cleanup_graph_workdirs(node)` exists, but
    successful-path tasks are not termination hooks. Cleanup failure must not hide
