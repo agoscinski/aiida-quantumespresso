@@ -3,6 +3,7 @@
 import warnings
 
 import pytest
+from aiida import orm
 from aiida.engine import ProcessBuilder
 
 from aiida_quantumespresso.common.types import ElectronicType, SpinType
@@ -375,7 +376,19 @@ def test_pseudos_overrides(fixture_code, generate_structure, generate_upf_data):
         pseudos = builder.pw.pseudos
         parameters = builder.pw.parameters.get_dict()
 
-        assert pseudos['Co'] == upf_data
+        if hasattr(orm, 'DataDict'):
+            # On ``aiida-core`` 3 the ``pseudos`` port is a static ``DataDict``: insertion copies the
+            # node, so compare by content and assert the caller-provided node stayed standalone.
+            from aiida.orm.nodes.data.container import is_owned
+
+            assert isinstance(pseudos, orm.DataDict)
+            assert set(pseudos.keys()) == {'Co'}
+            assert pseudos['Co'].element == upf_data.element
+            assert pseudos['Co'].md5 == upf_data.md5
+            assert not upf_data.is_stored
+            assert not is_owned(upf_data)
+        else:
+            assert pseudos['Co'] == upf_data
         assert parameters['SYSTEM']['ecutrho'] == 123
         assert parameters['SYSTEM']['ecutwfc'] == 456
         assert parameters['SYSTEM']['starting_magnetization']['Co'] == 1.0
@@ -461,7 +474,14 @@ def test_pseudo_family_without_cutoffs(fixture_code, generate_structure, pseudo_
     )
     parameters = builder.pw.parameters.get_dict()
 
-    assert builder.pw.pseudos['Si'].uuid == family.get_pseudo(element='Si').uuid
+    if hasattr(orm, 'DataDict'):
+        # On ``aiida-core`` 3 the ``pseudos`` port is a static ``DataDict``: insertion copies the
+        # family node, so compare by content instead of identity.
+        assert isinstance(builder.pw.pseudos, orm.DataDict)
+        assert builder.pw.pseudos['Si'].md5 == family.get_pseudo(element='Si').md5
+        assert builder.pw.pseudos['Si'].element == family.get_pseudo(element='Si').element
+    else:
+        assert builder.pw.pseudos['Si'].uuid == family.get_pseudo(element='Si').uuid
     assert parameters['SYSTEM']['ecutwfc'] == 30.0
     assert parameters['SYSTEM']['ecutrho'] == 240.0
 
@@ -588,3 +608,76 @@ def test_spin_orbit_pseudo_family(fixture_code, generate_structure):
     )
     assert builder.pw.parameters['SYSTEM']['ecutwfc'] == 30.0
     assert builder.pw.parameters['SYSTEM']['ecutrho'] == 240.0
+
+
+def test_code_input_contract(fixture_code, generate_structure):
+    """Test the ``code`` input contract of ``get_builder_from_protocol`` on the running ``aiida-core``.
+
+    The builder accepts any ``Code`` instance (the common base on both ``aiida-core`` 2 and 3) as
+    well as a label resolving through ``load_code``, and rejects anything else.
+    """
+    structure = generate_structure('silicon')
+    code = fixture_code('quantumespresso.pw')
+
+    builder = PwBaseWorkChain.get_builder_from_protocol(code, structure)
+    assert builder.pw.code.uuid == code.uuid
+
+    builder = PwBaseWorkChain.get_builder_from_protocol(code.label, structure)
+    assert builder.pw.code.uuid == code.uuid
+
+    with pytest.raises(TypeError, match='Code'):
+        PwBaseWorkChain.get_builder_from_protocol(orm.Dict(), structure)
+
+
+@pytest.mark.skipif(not hasattr(orm, 'DataDict'), reason='Static `pseudos` contract requires aiida-core 3.')
+def test_pseudos_datadict_preserves_originals(fixture_code, generate_structure, generate_upf_data):
+    """Test the static ``DataDict`` ``pseudos`` contract preserves the caller-provided nodes.
+
+    Insertion into a ``DataDict`` copies: the builder must expose a ``DataDict`` mapping each kind
+    to an equal-content node while the original ``UpfData`` stays standalone and unstored.
+    """
+    from aiida.orm.nodes.data.container import is_owned
+
+    structure = generate_structure('silicon')
+    upf_data = generate_upf_data('Si')
+
+    builder = PwBaseWorkChain.get_builder_from_protocol(
+        fixture_code('quantumespresso.pw'),
+        structure,
+        overrides={
+            'pw': {
+                'pseudos': {'Si': upf_data},
+                'parameters': {'SYSTEM': {'ecutwfc': 30.0, 'ecutrho': 240.0}},
+            }
+        },
+    )
+
+    pseudos = builder.pw.pseudos
+    assert isinstance(pseudos, orm.DataDict)
+    assert set(pseudos.keys()) == set(structure.get_kind_names())
+    assert pseudos['Si'].element == upf_data.element
+    assert pseudos['Si'].md5 == upf_data.md5
+    assert pseudos['Si'].uuid != upf_data.uuid
+    assert not upf_data.is_stored
+    assert not is_owned(upf_data)
+
+
+def test_silicon_family_ignores_owned_duplicates(generate_upf_data, generate_silicon_pseudo_family):
+    """Test fixture family creation is robust against stored ``DataDict``-owned duplicates.
+
+    On ``aiida-core`` 3, process inputs wrap ``UpfData`` nodes in an owned ``DataDict`` container and
+    the stored owned copies share the md5 checksum. Creating a fixture family afterwards must still
+    succeed with fresh standalone nodes instead of trying to group the owned copies.
+    """
+    from aiida.orm.nodes.data.container import is_owned
+    from aiida_pseudo.groups.family import PseudoPotentialFamily
+
+    upf = generate_upf_data('Si')
+    container = orm.DataDict({'Si': upf})
+    container.store()
+    assert is_owned(container['Si'])
+
+    family = generate_silicon_pseudo_family(PseudoPotentialFamily, 'custom/isolation-regression')
+    pseudo = family.get_pseudo(element='Si')
+    assert pseudo.md5 == upf.md5
+    assert not is_owned(pseudo)

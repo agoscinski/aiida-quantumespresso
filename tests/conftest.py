@@ -87,7 +87,7 @@ def serialize_builder():
         if isinstance(data, BaseType):
             return data.value
 
-        if isinstance(data, getattr(orm, 'AbstractCode', orm.Code)):
+        if isinstance(data, orm.Code):
             return data.label
 
         if hasattr(orm, 'DataDict') and isinstance(data, orm.DataDict):
@@ -167,10 +167,15 @@ def pseudo_family(generate_upf_data):
                     'cutoff_rho': cutoff_values[1],
                 }
 
+            # NOTE: ``deduplicate=False`` is required on ``aiida-core`` 3: process inputs wrap ``UpfData``
+            # nodes in an owned ``DataDict`` container and the stored owned copies share the md5 checksum.
+            # With deduplication, ``get_or_create`` could return an owned container child which the group
+            # refuses (groups only accept complete ownership units). Fresh standalone nodes keep the
+            # fixture independent of whatever other tests stored before it ran.
             if label.startswith('SSSP'):
-                family = SsspFamily.create_from_folder(dirpath, label)
+                family = SsspFamily.create_from_folder(dirpath, label, deduplicate=False)
             elif label.startswith('PseudoDojo'):
-                family = PseudoDojoFamily.create_from_folder(dirpath, label, pseudo_type=UpfData)
+                family = PseudoDojoFamily.create_from_folder(dirpath, label, pseudo_type=UpfData, deduplicate=False)
 
         family.set_cutoffs(cutoffs, stringency, unit='Ry')
 
@@ -192,7 +197,9 @@ def generate_silicon_pseudo_family(generate_upf_data):
                 handle.write(source.read())
                 handle.flush()
 
-            return family_type.create_from_folder(dirpath, label, pseudo_type=UpfData)
+            # NOTE: ``deduplicate=False`` keeps the fixture robust on ``aiida-core`` 3, where stored
+            # ``DataDict`` containers may already own an identical-md5 pseudo (see ``pseudo_family``).
+            return family_type.create_from_folder(dirpath, label, pseudo_type=UpfData, deduplicate=False)
 
     return _generate_silicon_pseudo_family
 
