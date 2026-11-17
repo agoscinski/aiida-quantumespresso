@@ -188,6 +188,12 @@ class StubPwCalc(PwCalculation):
                 return ExitCode(500, 'stub ionic failure')
             self._attach_success()
             return None
+        if self.MODE == 'considered-501':
+            self._attach_success()
+            return ExitCode(501, 'stub ionic converged except in final scf')
+        if self.MODE == 'warning-710':
+            self._attach_success()
+            return ExitCode(710, 'stub electronic convergence warning')
         if self.MODE == 'success':
             self._attach_success()
             return None
@@ -223,6 +229,18 @@ class SuccessPwCalc(StubPwCalc):
     """Stub succeeding at once."""
 
     MODE = 'success'
+
+
+class Considered501PwCalc(StubPwCalc):
+    """Stub persistently considered-finished with 501, storing usable outputs."""
+
+    MODE = 'considered-501'
+
+
+class Warning710PwCalc(StubPwCalc):
+    """Stub persistently considered-finished with 710, storing usable outputs."""
+
+    MODE = 'warning-710'
 
 
 class StubNebCalc(NebCalculation):
@@ -266,10 +284,20 @@ def _substitute(monkeypatch, stub, name, errors):
     patching the attribute redirects the real retry loop without copying its body.
     The compiled template is cached on the graph handle, so it is reset (and restored
     afterwards by ``monkeypatch``) to force recompilation against the substitute.
-    Pseudos wire directly through their static port; monitor forwarding is unchanged.
+    Pseudos wire directly through their static port; unmonitored runs use plain
+    ``pw_calc`` while monitored runs use ``pw_calc_monitored`` (static
+    ``monitors.stuck``). Both are patched to the same stub when the stub is a
+    ``PwCalculation`` so the real retry loop executes in either shape.
     """
-    inputs = {'monitors': orm.DataDict} if issubclass(stub, PwCalculation) else None
-    shaped = task(stub, inputs=inputs, errors=errors)
+    if issubclass(stub, PwCalculation) and name == 'pw_calc':
+        plain = task(stub, errors=errors)
+        monitored = task(stub, inputs={'monitors': {'stuck': orm.Dict}}, errors=errors)
+        monkeypatch.setattr(base, 'pw_calc', plain)
+        monkeypatch.setattr(base, 'pw_calc_monitored', monitored)
+        for handle in (base.pw_base_graph, base.neb_base_graph):
+            monkeypatch.setattr(handle, '_template', None)
+        return monitored
+    shaped = task(stub, errors=errors)
     monkeypatch.setattr(base, name, shaped)
     for handle in (base.pw_base_graph, base.neb_base_graph):
         monkeypatch.setattr(handle, '_template', None)
@@ -277,8 +305,8 @@ def _substitute(monkeypatch, stub, name, errors):
 
 
 def _pw_metadata() -> dict:
-    """Return the launch metadata the ``pw`` placement needs."""
-    return {'pw_calc': {'options': {}}}
+    """Return the launch metadata both ``pw`` placements need."""
+    return {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}}
 
 
 def _neb_metadata() -> dict:
@@ -301,6 +329,7 @@ def test_no_workchain_in_base_module() -> None:
     assert not hasattr(base, 'NebStaticWrapper')
     for handle in (
         base.pw_calc,
+        base.pw_calc_monitored,
         base.ph_calc,
         base.neb_calc,
         base.q2r_calc,
@@ -311,25 +340,38 @@ def test_no_workchain_in_base_module() -> None:
 
 
 def test_pw_graph_places_calc_once_per_loop_iteration() -> None:
-    """The ``pw`` retry loop places the calculation once and maps the handled failures."""
-    from aiida.engine.processes.graphs.ir import LoopControl, ProcessTask
+    """The ``pw`` retry loop places the calculation once per attempt in either monitor shape."""
+    from aiida.engine.processes.graphs.ir import BranchControl, LoopControl, ProcessTask
     from aiida.engine.processes.graphs.lowering import compile_graph
 
     template = compile_graph(base.pw_base_graph)
     (loop,) = [entry for entry in template.tasks if isinstance(entry, LoopControl)]
     assert loop.condition_port == 'restart' or loop.condition_port is not None
-    placed = [
-        entry
-        for entry in (*template.tasks, *loop.body.tasks)
-        if isinstance(entry, ProcessTask) and entry.spec.process_class is not None
-    ]
+
+    def _collect(tasks):
+        found = []
+        for entry in tasks:
+            if isinstance(entry, ProcessTask) and entry.spec.process_class is not None:
+                found.append(entry)
+            elif isinstance(entry, BranchControl):
+                for branch in entry.branches:
+                    found.extend(_collect(branch.tasks))
+            elif isinstance(entry, LoopControl):
+                found.extend(_collect(entry.body.tasks))
+        return found
+
+    placed = _collect(template.tasks)
     calc_placements = [entry for entry in placed if issubclass(entry.spec.process_class, PwCalculation)]
-    assert len(calc_placements) == 2  # one before the loop, one rebound inside it
+    # One call site before the loop and one rebound inside it, each branching over the
+    # plain ``pw_calc`` (no monitor inputs) and ``pw_calc_monitored`` (static ``monitors.stuck``).
+    assert len(calc_placements) == 4
+    assert {entry.name for entry in calc_placements} == {'pw_calc', 'pw_calc_monitored'}
     statuses = set()
     for entry in calc_placements:
         statuses.update(entry.spec.exit_codes.values())
     handled = {code.status for code in statuses}
     assert {410, 400, 462, 500} <= handled
+    assert {501, 710} <= handled  # considered-finished keeps its stored outputs
 
 
 @pytest.mark.usefixtures('aiida_profile_clean')
@@ -786,6 +828,86 @@ def test_pw_base_graph_dict_parameters_and_parent_folder(monkeypatch, aiida_code
 
 
 @pytest.mark.usefixtures('aiida_profile_clean')
+def test_classify_pw_finished_maps_considered_statuses() -> None:
+    """501/710 map to distinct finished statuses; anything else proceeds."""
+    outputs, node = run_get_node(
+        base.classify_pw_finished, error=PwErrors.IONIC_CONVERGENCE_REACHED_EXCEPT_IN_FINAL_SCF
+    )
+    assert node.is_finished_ok, node.exit_message
+    assert outputs['finished'].value is True
+    assert outputs['status'].value == 'finished_ionic_convergence_reached_except_final_scf'
+    outputs, node = run_get_node(base.classify_pw_finished, error=PwErrors.ELECTRONIC_CONVERGENCE_WARNING)
+    assert node.is_finished_ok, node.exit_message
+    assert outputs['finished'].value is True
+    assert outputs['status'].value == 'finished_electronic_convergence_warning'
+    for error in (None, PwErrors.OUT_OF_WALLTIME, PwErrors.STOPPED_BY_MONITOR):
+        outputs, node = run_get_node(base.classify_pw_finished, error=error)
+        assert node.is_finished_ok, node.exit_message
+        assert outputs['finished'].value is False
+
+
+@pytest.mark.usefixtures('aiida_profile_clean')
+def test_pw_base_graph_considered_501_returns_usable_outputs(monkeypatch, aiida_code_installed) -> None:
+    """A persistent 501 finishes at once with the stored outputs, not a retry.
+
+    Mirrors the legacy ``handle_vcrelax_converged_except_final_scf``: convergence
+    reached except in the final SCF is usable science, so the production graph
+    returns the failed run's stored nodes with a distinct report status. Nothing
+    here copies the graph body; the substitute only decides the exit status.
+    """
+    _substitute(monkeypatch, Considered501PwCalc, 'pw_calc', PwErrors)
+    code = aiida_code_installed(label='test.pw-501', default_calc_job_plugin='quantumespresso.pw')
+    outputs, node = run_get_node(
+        base.pw_base_graph,
+        code=code,
+        structure=_silicon(),
+        pseudos=_pseudos('Si'),
+        parameters={'CONTROL': {}, 'SYSTEM': {}, 'ELECTRONS': {'diagonalization': 'cg'}},
+        kpoints=_kpoints(),
+        task_metadata=_pw_metadata(),
+    )
+    assert node.is_finished_ok, node.exit_message
+    assert outputs['report'].get_dict() == {
+        'attempts': 1,
+        'status': 'finished_ionic_convergence_reached_except_final_scf',
+    }
+    assert outputs['output_parameters'].get_dict()['number_of_bands'] == 8
+    assert isinstance(outputs['output_structure'], orm.StructureData)
+    children = [child for child in node.called if child.process_label == 'Considered501PwCalc']
+    assert len(children) == 1
+    assert children[0].exit_status == 501
+
+
+@pytest.mark.usefixtures('aiida_profile_clean')
+def test_pw_base_graph_warning_710_returns_usable_outputs(monkeypatch, aiida_code_installed) -> None:
+    """A persistent 710 finishes at once with the stored outputs, not a retry.
+
+    Mirrors the legacy ``handle_electronic_convergence_warning``: with
+    ``scf_must_converge=False`` the unconverged result is the accepted outcome.
+    """
+    _substitute(monkeypatch, Warning710PwCalc, 'pw_calc', PwErrors)
+    code = aiida_code_installed(label='test.pw-710', default_calc_job_plugin='quantumespresso.pw')
+    outputs, node = run_get_node(
+        base.pw_base_graph,
+        code=code,
+        structure=_silicon(),
+        pseudos=_pseudos('Si'),
+        parameters={'CONTROL': {}, 'SYSTEM': {}, 'ELECTRONS': {'diagonalization': 'cg'}},
+        kpoints=_kpoints(),
+        task_metadata=_pw_metadata(),
+    )
+    assert node.is_finished_ok, node.exit_message
+    assert outputs['report'].get_dict() == {
+        'attempts': 1,
+        'status': 'finished_electronic_convergence_warning',
+    }
+    assert outputs['output_parameters'].get_dict()['number_of_bands'] == 8
+    children = [child for child in node.called if child.process_label == 'Warning710PwCalc']
+    assert len(children) == 1
+    assert children[0].exit_status == 710
+
+
+@pytest.mark.usefixtures('aiida_profile_clean')
 def test_neb_base_graph_diag_recovers_real_wiring(monkeypatch, aiida_code_installed) -> None:
     """The production ``neb`` graph cycles nested diagonalization across three runs."""
     _substitute(monkeypatch, StubNebCalc, 'neb_calc', NebErrors)
@@ -817,8 +939,10 @@ def test_error_enums_cover_documented_statuses() -> None:
     pw_statuses = {member.value.status for member in PwErrors}
     assert {150, 400, 410, 462, 500, 542} <= pw_statuses
     # 150 is claimed only on a machine-readable `monitor_diagnostics` reason, never on the exit message.
-    assert 501 not in pw_statuses  # considered-finished would lose its outputs
-    assert 710 not in pw_statuses
+    # 501/710 are considered-finished with usable outputs: the mapped failure keeps every
+    # stored declared output alongside the synthesized error, so the graph returns the real
+    # run outputs with a distinct report status instead of retrying or failing.
+    assert {501, 710} <= pw_statuses
     ph_statuses = {member.value.status for member in PhErrors}
     assert {120, 400, 410, 462} <= ph_statuses
     neb_statuses = {member.value.status for member in NebErrors}

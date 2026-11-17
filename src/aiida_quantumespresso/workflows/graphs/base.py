@@ -79,16 +79,39 @@ run genuinely never stored (for example a job killed before writing any output),
 instead of retrying degraded. The ``is not None`` rebinding checks stay as
 further defense in depth behind the guards.
 
-Static pseudos
----------------
+Static pseudos and the one supported monitor
+--------------------------------------------
 
 The ``pseudos`` inputs are static ``DataDict`` containers mapping kind names onto
 owned ``UpfData`` members (one entry per structure kind). CalcJobs consume the
 container directly; no pseudopotential namespace declaration or expansion is needed
 in the graph. Provenance links the single ``pseudos`` container, whose members keep
-their identity and repository content. Monitor inputs retain their existing dynamic
-namespace and graph forwarding behavior. ``Code`` inputs are required; scheduler
+their identity and repository content. ``Code`` inputs are required; scheduler
 options travel in ``task_metadata`` keyed by placement name.
+
+There is no container forwarding into the ``CalcJob`` ``monitors`` namespace: the
+monitored ``pw`` placement declares the one supported entry statically
+(``monitors.stuck`` holding a monitor ``Dict``), and a plain ``pw`` placement
+covers unmonitored runs with no monitor inputs at all. Core static declarations
+are required when wired, so one handle cannot serve both shapes. The ``monitors``
+graph input stays an optional ``DataDict`` so composites keep threading per-stage
+mappings unchanged; a boundary task extracts the single known ``stuck`` entry
+(rejecting any other key or non-``Dict`` member outright) and each ``pw`` call
+site branches on its presence. Only the structured ``accuracy_stuck`` monitor can
+drive recovery: the monitor-stuck handler claims ``STOPPED_BY_MONITOR`` only on
+the machine-readable ``monitor_diagnostics['reason'] == 'accuracy_stuck'``.
+
+Considered-finished 501/710 stay usable
+----------------------------------------
+
+Legacy ``501`` (ionic converged except in final SCF) and ``710`` (electronic
+convergence warning with ``scf_must_converge=False``) finish *with* outputs. The
+graph maps both in ``PwErrors`` and returns the failed run's stored outputs (the
+runtime keeps them alongside the synthesized error) with a distinct report
+status (``finished_ionic_convergence_reached_except_final_scf`` /
+``finished_electronic_convergence_warning``) instead of retrying or failing.
+These are implemented report outcomes; the graphs declare no numeric exit
+codes, so this is not exact numeric root parity with the legacy statuses.
 
 Native ``pw`` subgraph
 ----------------------
@@ -96,9 +119,11 @@ Native ``pw`` subgraph
 ``pw_base_graph`` is the reusable restart loop for composite graphs:
 ``(code, structure, pseudos, parameters, settings?, kpoints?, kpoints_distance?,
 kpoints_force_parity?, parent_folder?, monitors?, max_iterations?)``. ``parameters`` accepts a
-plain ``dict`` or an ``orm.Dict``. ``monitors`` is an optional ``DataDict`` mapping
-monitor names onto monitor ``Dict`` nodes (entry point plus kwargs); dispatch expands
-it into the existing ``CalcJob`` monitor namespace. Structured monitors attach
+plain ``dict`` or an ``orm.Dict``. ``monitors`` is an optional ``DataDict`` carrying
+at most the single known ``stuck`` monitor ``Dict`` (entry point plus kwargs); the
+graph resolves it to the statically declared ``monitors.stuck`` CalcJob input and
+wires nothing when it is absent, so unmonitored runs carry no monitor inputs.
+Structured monitors attach
 a ``monitor_diagnostics`` output that the monitor-stuck handler reads. It returns the calculation outputs
 (``output_parameters`` always; ``output_structure``, ``output_band``,
 ``output_trajectory``, ``output_kpoints``, ``output_atomic_occupations`` and
@@ -170,6 +195,14 @@ class PwErrors(ExitCodeEnum):
     )
     RADIAL_FFT_SIGNIFICANT_VOLUME_CONTRACTION = ExitCode(
         542, 'The cell relaxation caused a significant volume contraction.'
+    )
+    IONIC_CONVERGENCE_REACHED_EXCEPT_IN_FINAL_SCF = ExitCode(
+        501, 'The ionic minimization cycle converged but the thresholds are exceeded in the final SCF.'
+    )
+    ELECTRONIC_CONVERGENCE_WARNING = ExitCode(
+        710,
+        'The electronic minimization cycle did not reach self-consistency, but `scf_must_converge` '
+        'is `False` and/or `electron_maxstep` is 0.',
     )
 
 
@@ -642,9 +675,39 @@ def finalize_pw_carry(
     }
 
 
+class PwFinished(t.TypedDict):
+    """Considered-finished outcome: task outputs cannot be ``None``."""
+
+    finished: bool
+    status: str
+
+
 @task
-def ensure_pw_recovered(error: PwErrors | None, restart: bool) -> None:
+def classify_pw_finished(error: PwErrors | None) -> PwFinished:
+    """Return the considered-finished outcome for 501/710, else a proceed sentinel.
+
+    Mirrors the legacy ``handle_vcrelax_converged_except_final_scf`` (501) and
+    ``handle_electronic_convergence_warning`` (710): both consider the run finished
+    *with* usable outputs instead of retrying. The mapped failure keeps every stored
+    declared output alongside the synthesized error, so the graph returns the real
+    ``run.output_*`` nodes with a distinct report status naming the outcome. Task
+    outputs cannot return ``None`` (the runtime rejects the absent arm), so the
+    proceed path carries ``finished=False`` with a ``'proceed'`` status the graph
+    never reports; the full status strings are built here because graph bodies
+    cannot format text.
+    """
+    if error is PwErrors.IONIC_CONVERGENCE_REACHED_EXCEPT_IN_FINAL_SCF:
+        return {'finished': True, 'status': 'finished_ionic_convergence_reached_except_final_scf'}
+    if error is PwErrors.ELECTRONIC_CONVERGENCE_WARNING:
+        return {'finished': True, 'status': 'finished_electronic_convergence_warning'}
+    return {'finished': False, 'status': 'proceed'}
+
+
+@task
+def ensure_pw_recovered(error: PwErrors | None, restart: bool, finished: bool = False) -> None:
     """Fail the graph when the ``pw`` loop exits without a recovered run."""
+    if finished:
+        return
     if error is not None or restart:
         raise ValueError('the pw restart loop never recovered.')
 
@@ -1158,7 +1221,148 @@ def rattle_positions(structure: orm.StructureData, stdev: float) -> orm.Structur
     return rattled
 
 
-pw_calc = task(PwCalculation, inputs={'monitors': orm.DataDict}, errors=PwErrors)
+#: The only monitor key the native graphs wire into the ``CalcJob`` ``monitors``
+#: namespace. The ``monitors`` graph inputs stay ``DataDict`` mappings so composites
+#: keep threading per-stage mappings unchanged, but anything besides this single
+#: entry is rejected at the boundary instead of silently dropped.
+STUCK_MONITOR_KEY = 'stuck'
+
+#: The only monitor entry point the native graphs can recover from. Recovery keys on the
+#: machine-readable ``monitor_diagnostics['reason'] == 'accuracy_stuck'`` that only the structured
+#: ``quantumespresso.accuracy_stuck`` monitor attaches, so any other entry point would stop the
+#: calculation without ever driving recovery. Mirrored from the protocol helper's private validator
+#: (``workflows.graphs.protocols``) instead of imported: this boundary module must not depend on the
+#: launch helper, so the two stay in sync by convention, not by import.
+KNOWN_STUCK_ENTRY_POINT = 'quantumespresso.accuracy_stuck'
+
+#: Allowed kwargs of the known accuracy-stuck monitor, mirroring the protocol helper.
+KNOWN_STUCK_KWARGS = frozenset({'min_repeats', 'structured'})
+
+#: Top-level monitor specification fields the resolver preserves. ``entry_point`` and ``kwargs``
+#: are validated strictly (see above); the rest are the ``CalcJobMonitor`` runtime fields a direct
+#: launch may set (for example ``priority``). Anything else fails fast as a likely typo instead of
+#: travelling silently into the placement inputs.
+ALLOWED_STUCK_SPEC_KEYS = frozenset(
+    {'entry_point', 'kwargs', 'priority', 'minimum_poll_interval', 'call_timestamp', 'disabled'}
+)
+
+
+class StuckMonitorResolution(t.TypedDict):
+    """Boundary monitor outcome: task outputs cannot be ``None``."""
+
+    present: bool
+    monitor: dict
+
+
+@task
+def resolve_stuck_monitor(monitors: orm.DataDict | None) -> StuckMonitorResolution:
+    """Extract the supported ``stuck`` monitor entry, if any, rejecting anything else.
+
+    The ``CalcJob`` ``monitors`` namespace is dynamic, so the graph cannot declare
+    an open mapping there; the monitored ``pw`` placement instead declares the one
+    known entry statically (``monitors.stuck``) while the plain placement wires no
+    monitor input at all. This boundary task converts the shared ``DataDict``
+    mapping: ``None`` or an empty mapping resolves to ``present=False`` (the graph
+    branches to the unmonitored placement), a single ``stuck`` ``Dict`` holding the
+    structured ``quantumespresso.accuracy_stuck`` monitor resolves to an owned copy
+    of it, and anything else fails fast naming the offending value. Only the
+    structured variant (``kwargs['structured'] is True``, seeded when absent) can
+    drive recovery, since the monitor-stuck handler claims ``STOPPED_BY_MONITOR``
+    only on the machine-readable ``monitor_diagnostics['reason']`` the structured
+    monitor attaches. Allowed ``CalcJobMonitor`` runtime fields (for example
+    ``priority``) are preserved untouched on the owned copy. Task outputs cannot
+    return ``None``, so the absent path carries an empty mapping the graph never
+    wires. Downstream recovery still keys on the structured
+    ``monitor_diagnostics['reason']``, never on this task.
+    """
+    if monitors is None or len(monitors) == 0:
+        return {'present': False, 'monitor': {}}
+    keys = list(monitors.keys())
+    if keys != [STUCK_MONITOR_KEY]:
+        msg = (
+            'unsupported `monitors` mapping: native graphs only wire the single '
+            f"'{STUCK_MONITOR_KEY}' monitor entry, got keys {keys}."
+        )
+        raise ValueError(msg)
+    member = monitors[STUCK_MONITOR_KEY]
+    if not isinstance(member, orm.Dict):
+        msg = (
+            f"`monitors['{STUCK_MONITOR_KEY}']` must be a `Dict` holding the monitor entry point and "
+            f'kwargs, got `{type(member).__name__}`.'
+        )
+        raise ValueError(msg)
+    spec = member.get_dict()
+    for key in spec:
+        if key not in ALLOWED_STUCK_SPEC_KEYS:
+            msg = (
+                f"`monitors['{STUCK_MONITOR_KEY}.{key}']` is not supported; expected one of "
+                f'{sorted(ALLOWED_STUCK_SPEC_KEYS)}.'
+            )
+            raise ValueError(msg)
+    entry_point = spec.get('entry_point')
+    if entry_point != KNOWN_STUCK_ENTRY_POINT:
+        msg = (
+            f"`monitors['{STUCK_MONITOR_KEY}'].entry_point` must be `{KNOWN_STUCK_ENTRY_POINT}`, "
+            f'got `{entry_point!r}`: only the structured accuracy-stuck monitor can drive recovery.'
+        )
+        raise ValueError(msg)
+    kwargs = spec.get('kwargs', {})
+    if kwargs is None:
+        kwargs = {}
+    if not isinstance(kwargs, dict):
+        msg = f"`monitors['{STUCK_MONITOR_KEY}'].kwargs` must be a mapping, got `{type(kwargs).__name__}`."
+        raise ValueError(msg)
+    for key in kwargs:
+        if key not in KNOWN_STUCK_KWARGS:
+            msg = (
+                f"`monitors['{STUCK_MONITOR_KEY}'].kwargs.{key}` is not supported; expected one of "
+                f'{sorted(KNOWN_STUCK_KWARGS)}.'
+            )
+            raise ValueError(msg)
+    if 'min_repeats' in kwargs and (
+        isinstance(kwargs['min_repeats'], bool) or not isinstance(kwargs['min_repeats'], int)
+    ):
+        msg = (
+            f"`monitors['{STUCK_MONITOR_KEY}'].kwargs.min_repeats` must be an `int`, got "
+            f'`{type(kwargs["min_repeats"]).__name__}`.'
+        )
+        raise ValueError(msg)
+    if 'min_repeats' in kwargs and kwargs['min_repeats'] <= 0:
+        msg = f"`monitors['{STUCK_MONITOR_KEY}'].kwargs.min_repeats` must be positive."
+        raise ValueError(msg)
+    if 'structured' in kwargs and not isinstance(kwargs['structured'], bool):
+        msg = (
+            f"`monitors['{STUCK_MONITOR_KEY}'].kwargs.structured` must be a `bool`, got "
+            f'`{type(kwargs["structured"]).__name__}`.'
+        )
+        raise ValueError(msg)
+    if kwargs.get('structured', True) is not True:
+        msg = (
+            f"`monitors['{STUCK_MONITOR_KEY}'].kwargs.structured` must be `True`: unstructured stops "
+            'carry no diagnostics for the monitor-stuck handler to match on.'
+        )
+        raise ValueError(msg)
+    resolved = dict(spec)
+    if 'kwargs' not in resolved or 'structured' not in kwargs:
+        resolved_kwargs = dict(kwargs)
+        resolved_kwargs.setdefault('structured', True)
+        resolved['kwargs'] = resolved_kwargs
+        # Returning the member itself would hand back an input-owned node, so the
+        # placement wires an owned copy, exactly like the node-rebinding tasks above.
+        return {'present': True, 'monitor': orm.Dict(resolved)}
+    # Returning the member itself would hand back an input-owned node, so the
+    # placement wires an owned copy, exactly like the node-rebinding tasks above.
+    return {'present': True, 'monitor': member.clone()}
+
+
+pw_calc = task(PwCalculation, errors=PwErrors)
+#: Monitored ``pw`` placement: the one supported entry is declared statically as
+#: ``monitors.stuck`` holding a monitor ``Dict``. Core static declarations are
+#: required when wired, so unmonitored runs use plain ``pw_calc`` (no monitor
+#: inputs at all) while monitored runs use this handle. Both share ``PwErrors``,
+#: including the considered-finished 501/710 members whose stored outputs stay
+#: available downstream alongside the synthesized error.
+pw_calc_monitored = task(PwCalculation, inputs={'monitors': {'stuck': orm.Dict}}, errors=PwErrors)
 ph_calc = task(PhCalculation, errors=PhErrors)
 neb_calc = task(NebCalculation, errors=NebErrors)
 q2r_calc = task(Q2rCalculation)
@@ -1192,8 +1396,9 @@ def pw_base_graph(
     only when the failed run genuinely never stored the needed node.
     ``parameters`` accepts a plain ``dict`` or an ``orm.Dict``. Scheduler options
     travel in ``task_metadata`` keyed by placement name at launch. ``monitors`` is an
-    optional ``DataDict`` forwarded into the existing ``CalcJob`` monitor namespace;
-    omit it (or pass an empty mapping) and the placements run unmonitored.
+    optional ``DataDict`` carrying at most the single known ``stuck`` monitor entry;
+    omit it (or pass an empty mapping) and the placements run unmonitored with no
+    monitor inputs wired. Any other entry fails fast in ``resolve_stuck_monitor``.
     """
     if kpoints is None:
         resolved_kpoints = gen_kpoints(
@@ -1202,16 +1407,29 @@ def pw_base_graph(
     else:
         resolved_kpoints = kpoints
     tried = seed_diagonalizations(parameters=parameters)
-    run = pw_calc(
-        code=code,
-        structure=structure,
-        pseudos=pseudos,
-        parameters=parameters,
-        settings=settings,
-        kpoints=resolved_kpoints,
-        parent_folder=parent_folder,
-        monitors=monitors,
-    )
+    stuck = resolve_stuck_monitor(monitors=monitors)
+    if stuck.present:
+        run = pw_calc_monitored(
+            code=code,
+            structure=structure,
+            pseudos=pseudos,
+            parameters=parameters,
+            settings=settings,
+            kpoints=resolved_kpoints,
+            parent_folder=parent_folder,
+            monitors={'stuck': stuck.monitor},
+        )
+    else:
+        run = pw_calc(
+            code=code,
+            structure=structure,
+            pseudos=pseudos,
+            parameters=parameters,
+            settings=settings,
+            kpoints=resolved_kpoints,
+            parent_folder=parent_folder,
+        )
+    finished = classify_pw_finished(error=run.error)
     plan_walltime = handle_pw_walltime(error=run.error, parameters=parameters, tried=tried)
     plan_diagonalization = handle_pw_diagonalization(
         error=run.error,
@@ -1300,18 +1518,30 @@ def pw_base_graph(
         parent = None
     restart = plan_bands.restart
     attempts = 1
-    while (run.error is not None or restart) and attempts < max_iterations:
+    while ((run.error is not None and not finished.finished) or restart) and attempts < max_iterations:
         attempts = attempts + 1
-        run = pw_calc(
-            code=code,
-            structure=structure,
-            pseudos=pseudos,
-            parameters=final.parameters,
-            settings=settings,
-            kpoints=resolved_kpoints,
-            parent_folder=parent,
-            monitors=monitors,
-        )
+        if stuck.present:
+            run = pw_calc_monitored(
+                code=code,
+                structure=structure,
+                pseudos=pseudos,
+                parameters=final.parameters,
+                settings=settings,
+                kpoints=resolved_kpoints,
+                parent_folder=parent,
+                monitors={'stuck': stuck.monitor},
+            )
+        else:
+            run = pw_calc(
+                code=code,
+                structure=structure,
+                pseudos=pseudos,
+                parameters=final.parameters,
+                settings=settings,
+                kpoints=resolved_kpoints,
+                parent_folder=parent,
+            )
+        finished = classify_pw_finished(error=run.error)
         plan_walltime = handle_pw_walltime(error=run.error, parameters=final.parameters, tried=final.tried)
         plan_diagonalization = handle_pw_diagonalization(
             error=run.error,
@@ -1395,8 +1625,10 @@ def pw_base_graph(
         else:
             parent = None
         restart = plan_bands.restart
-    checked = ensure_pw_recovered(error=run.error, restart=restart)
-    if run.error is None and not restart:
+    checked = ensure_pw_recovered(error=run.error, restart=restart, finished=finished.finished)
+    if finished.finished:
+        status = finished.status
+    elif run.error is None and not restart:
         status = 'finished'
     else:
         status = 'exhausted'
