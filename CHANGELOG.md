@@ -1,3 +1,47 @@
+## Unreleased
+
+### Experimental graph improvements
+
+* Add plain `get_inputs_from_protocol` submission mappings, including offline
+  explicit pseudos or installed pseudo families, cutoffs, per-atom thresholds,
+  spin/electronic settings, and typed monitor inputs. Unsupported options fail
+  explicitly rather than being silently dropped.
+* Native PW recovery uses opt-in structured `accuracy_stuck` diagnostics instead
+  of message prefixes; the legacy monitor's default string result is unchanged.
+* Independent scheduler settings for reused native base subgraphs now survive
+  retries through scoped `task_metadata` rules (requires the pinned core).
+* Add externally owned post-termination cleanup and PH output merging helpers.
+  These do not automatically run on cancellation or replace graph return outputs.
+* Native `CalcJob` pseudopotentials go static on `aiida-core` 3: `BasePwCpInputGenerator`
+  (so `PwCalculation`/`CpCalculation`) declares `pseudos` as one `DataDict` input
+  (`valid_type=orm.DataDict`, `serializer=orm.DataDict`) with per-member validation for legacy
+  `core.upf` / `pseudo.upf` nodes, instead of the dynamic `pseudos` namespace closure. Plain `dict`
+  launch inputs keep working through the serializer, which copies nodes into the container without
+  mutating the caller's mapping. `NebCalculation` inherits the static `pw.pseudos` through
+  `expose_inputs` with the `pw` namespace pinned static, so plain `task(...)` handles build from the
+  native spec with no `inputs=`. The `aiida-core` 2.x dynamic-namespace branch is retained
+  (`pyproject.toml` still pins `aiida_core~=2.8`). Staged `local_copy_list` entries now reference the
+  owned container copies (fresh UUIDs); generated input files are unchanged.
+
+### Breaking changes (experimental graph API only)
+
+* `task_metadata` is now nested by authored graph-call names, with normal CalcJob
+  metadata at the leaves. Native graph aliases (`scf`, `nscf`, `bands`, `initial`,
+  `main`) distinguish reused base graphs. Flat nested-task keys, provenance-label
+  keys, wildcard scopes, and generated suffix addresses are no longer used.
+  Protocol helpers emit the new shape; initial and main relaxation scheduler
+  options now resolve independently. Loops and branches add no mapping level.
+
+* `workflows.graphs.base.pw_base_graph` and `neb_base_graph` now accept
+  `pseudos: DataDict` instead of a fixed single-kind `pseudo`, place CalcJobs
+  directly, and accept an initial `parent_folder`. `NebStaticWrapper` and
+  `workflows.graphs.pw.PwBaseStep`/`run_pw_base` have been removed; composite
+  graphs now call the native PW base subgraph.
+* Scheduler options for composites now go through launch-time `task_metadata`,
+  not `options` input ports. PDOS has explicit `_serial`/`_parallel` graph roots
+  instead of `serial_clean`; unqualified root names alias the parallel variant.
+  Legacy WorkChain entry points and APIs remain unchanged.
+
 ## v5.1.0
 
 This release adds support for Quantum ESPRESSO v7.6 and introduces the first calculation monitor, `accuracy_stuck`, which kills a `PwCalculation` whose SCF accuracy has plateaued.

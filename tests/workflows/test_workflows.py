@@ -1,8 +1,8 @@
 """General tests for workflows."""
 
 import pytest
-from aiida.engine import CalcJob
-from plumpy import ProcessState
+
+from aiida.engine import CalcJob, ProcessState
 
 
 @pytest.mark.parametrize(
