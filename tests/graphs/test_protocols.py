@@ -14,7 +14,7 @@ Run from the parent core checkout with the QE dependencies installed::
 
 The raw-YAML helpers return plain protocol settings and never import a
 ``WorkChain``. ``get_inputs_from_protocol`` translates that nesting into
-launch-ready native graph inputs plus ``task_metadata``; the launch tests run
+launch-ready native graph inputs plus ``runtime_config``; the launch tests run
 the production ``pw_relax_graph`` / ``pw_bands_graph`` /
 ``pdos_from_scratch_serial`` with only the external ``CalcJob`` placements
 substituted by the deterministic stubs reused from ``test_native_workflows``.
@@ -146,33 +146,33 @@ def test_pw_protocol_inputs_expose_relax_bands_keys() -> None:
     assert bands['bands_kpoints_distance'] == 0.1
 
 
-def test_task_metadata_for_options_preserves_empty_leaves() -> None:
+def test_runtime_config_for_placements_preserves_empty_leaves() -> None:
     """An empty leaf requests default CalcJob metadata; only explicit None is omitted."""
-    assert protocols.task_metadata_for_options() == {}
-    assert protocols.task_metadata_for_options(pw_calc=None, dos_calc={}) == {'dos_calc': {}}
-    mapping = protocols.task_metadata_for_options(
-        pw_calc={'options': {'max_wallclock_seconds': 3600}},
-        dos_calc={'options': {'withmpi': True}},
+    assert protocols.runtime_config_for_placements() == {}
+    assert protocols.runtime_config_for_placements(pw_calc=None, dos_calc={}) == {'dos_calc': {}}
+    mapping = protocols.runtime_config_for_placements(
+        pw_calc={'metadata': {'options': {'max_wallclock_seconds': 3600}}},
+        dos_calc={'metadata': {'options': {'withmpi': True}}},
     )
     assert mapping == {
-        'pw_calc': {'options': {'max_wallclock_seconds': 3600}},
-        'dos_calc': {'options': {'withmpi': True}},
+        'pw_calc': {'metadata': {'options': {'max_wallclock_seconds': 3600}}},
+        'dos_calc': {'metadata': {'options': {'withmpi': True}}},
     }
-    scoped = protocols.task_metadata_for_options(
-        scf={'pw_calc': {'options': {'max_wallclock_seconds': 1111}}},
+    scoped = protocols.runtime_config_for_placements(
+        scf={'pw_calc': {'metadata': {'options': {'max_wallclock_seconds': 1111}}}},
         bands=None,
     )
-    assert scoped == {'scf': {'pw_calc': {'options': {'max_wallclock_seconds': 1111}}}}
+    assert scoped == {'scf': {'pw_calc': {'metadata': {'options': {'max_wallclock_seconds': 1111}}}}}
 
 
-def test_pdos_protocol_task_metadata_lifts_options() -> None:
+def test_pdos_protocol_runtime_config_lifts_options() -> None:
     """The PDOS helper lifts ``dos``/``projwfc`` scheduler options under placement names."""
     inputs = protocols.get_protocol_inputs('pdos', protocol='balanced')
-    task_metadata = protocols.pdos_protocol_task_metadata(inputs)
-    assert task_metadata['dos_calc']['options']['max_wallclock_seconds'] == 43200
-    assert task_metadata['projwfc_calc']['options']['max_wallclock_seconds'] == 43200
+    runtime_config = protocols.pdos_protocol_runtime_config(inputs)
+    assert runtime_config['dos_calc']['metadata']['options']['max_wallclock_seconds'] == 43200
+    assert runtime_config['projwfc_calc']['metadata']['options']['max_wallclock_seconds'] == 43200
     # The PW options stay out: the base graph takes them under its own key.
-    assert 'pw_calc' not in task_metadata
+    assert 'pw_calc' not in runtime_config
 
 
 def test_no_workchain_import() -> None:
@@ -212,14 +212,17 @@ def test_launch_relax_explicit_pseudos(aiida_code_installed, generate_upf_data) 
     assert launch['kpoints_distance'].value == pytest.approx(0.15)
     assert launch['run_init_relax'] is True
     assert launch['pseudos']['Si'].z_valence == 4.0
-    assert launch['task_metadata']['main']['pw_calc']['options']['max_wallclock_seconds'] == 43200
+    assert launch['runtime_config']['main']['pw_calc']['metadata']['options']['max_wallclock_seconds'] == 43200
     assert (
-        launch['task_metadata']['init_relax_guarded']['initial']['pw_calc']['options']['max_wallclock_seconds'] == 43200
+        launch['runtime_config']['init_relax_guarded']['initial']['pw_calc']['metadata']['options'][
+            'max_wallclock_seconds'
+        ]
+        == 43200
     )
-    assert launch['task_metadata']['main']['pw_calc_monitored'] == launch['task_metadata']['main']['pw_calc']
+    assert launch['runtime_config']['main']['pw_calc_monitored'] == launch['runtime_config']['main']['pw_calc']
     assert (
-        launch['task_metadata']['init_relax_guarded']['initial']['pw_calc_monitored']
-        == launch['task_metadata']['init_relax_guarded']['initial']['pw_calc']
+        launch['runtime_config']['init_relax_guarded']['initial']['pw_calc_monitored']
+        == launch['runtime_config']['init_relax_guarded']['initial']['pw_calc']
     )
 
 
@@ -237,13 +240,16 @@ def test_launch_relax_init_main_options_resolve_per_scope(monkeypatch, aiida_cod
         pseudos={'Si': generate_upf_data('Si')},
         overrides=overrides,
     )
-    task_metadata = launch['task_metadata']
-    assert task_metadata['init_relax_guarded']['initial']['pw_calc']['options']['max_wallclock_seconds'] == 1111
-    assert task_metadata['main']['pw_calc']['options']['max_wallclock_seconds'] == 2222
-    assert task_metadata['main']['pw_calc_monitored'] == task_metadata['main']['pw_calc']
+    runtime_config = launch['runtime_config']
     assert (
-        task_metadata['init_relax_guarded']['initial']['pw_calc_monitored']
-        == task_metadata['init_relax_guarded']['initial']['pw_calc']
+        runtime_config['init_relax_guarded']['initial']['pw_calc']['metadata']['options']['max_wallclock_seconds']
+        == 1111
+    )
+    assert runtime_config['main']['pw_calc']['metadata']['options']['max_wallclock_seconds'] == 2222
+    assert runtime_config['main']['pw_calc_monitored'] == runtime_config['main']['pw_calc']
+    assert (
+        runtime_config['init_relax_guarded']['initial']['pw_calc_monitored']
+        == runtime_config['init_relax_guarded']['initial']['pw_calc']
     )
     _, root = run_get_node(pw_relax_graph, **launch)
     assert root.is_finished_ok, root.exit_message
@@ -256,14 +262,14 @@ def test_launch_relax_init_main_options_resolve_per_scope(monkeypatch, aiida_cod
 def test_protocol_rejects_non_mapping_metadata(aiida_code_installed, bad_metadata) -> None:
     """Malformed overrides receive a boundary error rather than an internal merge failure."""
     code = aiida_code_installed(label='test.bad-metadata', default_calc_job_plugin='quantumespresso.pw')
-    with pytest.raises(ValueError, match='task_metadata'):
+    with pytest.raises(ValueError, match='runtime_config'):
         protocols.get_inputs_from_protocol(
             'pw_relax',
             structure=_silicon(),
             code=code,
             pseudos={'Si': _upf()},
             overrides=_cutoff_overrides(30.0, 240.0, 'base_relax', 'base_init_relax'),
-            task_metadata=bad_metadata,
+            runtime_config=bad_metadata,
         )
 
 
@@ -407,12 +413,12 @@ def test_launch_bands_inputs(aiida_code_installed) -> None:
     assert launch['bands_kpoints_distance'].value == pytest.approx(0.025)
     assert launch['nbands_factor'].value == pytest.approx(3.0)
     assert launch['scf_parameters'].get_dict()['SYSTEM']['ecutwfc'] == 30.0
-    task_metadata = launch['task_metadata']
-    assert set(task_metadata) == {'scf', 'bands'}
+    runtime_config = launch['runtime_config']
+    assert set(runtime_config) == {'scf', 'bands'}
     for scope in ('scf', 'bands'):
-        assert set(task_metadata[scope]) == {'pw_calc', 'pw_calc_monitored'}
-        assert task_metadata[scope]['pw_calc']['options']['max_wallclock_seconds'] == 43200
-        assert task_metadata[scope]['pw_calc_monitored'] == task_metadata[scope]['pw_calc']
+        assert set(runtime_config[scope]) == {'pw_calc', 'pw_calc_monitored'}
+        assert runtime_config[scope]['pw_calc']['metadata']['options']['max_wallclock_seconds'] == 43200
+        assert runtime_config[scope]['pw_calc_monitored'] == runtime_config[scope]['pw_calc']
 
 
 def test_launch_bands_kpoints_conflict(aiida_code_installed) -> None:
@@ -452,23 +458,23 @@ def test_launch_pdos_inputs(aiida_code_installed) -> None:
     assert 'smearing' not in nscf['SYSTEM']
     assert launch['nscf_kpoints_distance'].value == pytest.approx(0.10)
     assert launch['dos_parameters'].get_dict()['DOS']['deltae'] == pytest.approx(0.01)
-    task_metadata = launch['task_metadata']
-    assert set(task_metadata) == {'scf', 'pdos_stage_parallel'}
-    assert set(task_metadata['scf']) == {'pw_calc', 'pw_calc_monitored'}
-    assert set(task_metadata['pdos_stage_parallel']) == {'nscf', 'dos_calc', 'projwfc_calc'}
-    assert set(task_metadata['pdos_stage_parallel']['nscf']) == {'pw_calc', 'pw_calc_monitored'}
-    assert task_metadata['scf']['pw_calc_monitored'] == task_metadata['scf']['pw_calc']
+    runtime_config = launch['runtime_config']
+    assert set(runtime_config) == {'scf', 'pdos_stage_parallel'}
+    assert set(runtime_config['scf']) == {'pw_calc', 'pw_calc_monitored'}
+    assert set(runtime_config['pdos_stage_parallel']) == {'nscf', 'dos_calc', 'projwfc_calc'}
+    assert set(runtime_config['pdos_stage_parallel']['nscf']) == {'pw_calc', 'pw_calc_monitored'}
+    assert runtime_config['scf']['pw_calc_monitored'] == runtime_config['scf']['pw_calc']
     assert (
-        task_metadata['pdos_stage_parallel']['nscf']['pw_calc_monitored']
-        == task_metadata['pdos_stage_parallel']['nscf']['pw_calc']
+        runtime_config['pdos_stage_parallel']['nscf']['pw_calc_monitored']
+        == runtime_config['pdos_stage_parallel']['nscf']['pw_calc']
     )
     for leaf in (
-        task_metadata['scf']['pw_calc'],
-        task_metadata['pdos_stage_parallel']['nscf']['pw_calc'],
-        task_metadata['pdos_stage_parallel']['dos_calc'],
-        task_metadata['pdos_stage_parallel']['projwfc_calc'],
+        runtime_config['scf']['pw_calc'],
+        runtime_config['pdos_stage_parallel']['nscf']['pw_calc'],
+        runtime_config['pdos_stage_parallel']['dos_calc'],
+        runtime_config['pdos_stage_parallel']['projwfc_calc'],
     ):
-        assert leaf['options']['max_wallclock_seconds'] == 43200
+        assert leaf['metadata']['options']['max_wallclock_seconds'] == 43200
     serial = protocols.get_inputs_from_protocol(
         'pdos',
         structure=_silicon(),
@@ -479,8 +485,11 @@ def test_launch_pdos_inputs(aiida_code_installed) -> None:
         serial=True,
         overrides=_cutoff_overrides(30.0, 240.0, 'scf', 'nscf'),
     )
-    assert serial['task_metadata']['pdos_stage_serial']['dos_calc']['options']['max_wallclock_seconds'] == 43200
-    assert 'scf' in serial['task_metadata']
+    assert (
+        serial['runtime_config']['pdos_stage_serial']['dos_calc']['metadata']['options']['max_wallclock_seconds']
+        == 43200
+    )
+    assert 'scf' in serial['runtime_config']
 
 
 @pytest.mark.parametrize('kind', ['pw_relax', 'pw_bands'])
@@ -567,9 +576,9 @@ def test_launch_bands_per_scope_options(monkeypatch, aiida_code_installed) -> No
         bands_code=code,
         pseudos={'Si': _upf()},
         overrides=_cutoff_overrides(30.0, 240.0, 'scf', 'bands'),
-        task_metadata={
-            'scf': {'pw_calc': {'options': {'max_wallclock_seconds': 1111}}},
-            'bands': {'pw_calc': {'options': {'max_wallclock_seconds': 2222}}},
+        runtime_config={
+            'scf': {'pw_calc': {'metadata': {'options': {'max_wallclock_seconds': 1111}}}},
+            'bands': {'pw_calc': {'metadata': {'options': {'max_wallclock_seconds': 2222}}}},
         },
     )
     outputs, node = run_get_node(pw_bands_graph, **launch)

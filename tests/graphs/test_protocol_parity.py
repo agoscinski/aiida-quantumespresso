@@ -123,8 +123,8 @@ def test_relax_global_options_seed_both_cutoffs(aiida_code_installed) -> None:
     assert launch['init_parameters'].get_dict()['CONTROL']['max_seconds'] == pytest.approx(3600 * 0.95)
 
 
-def test_relax_explicit_task_metadata_wallclock_wins(aiida_code_installed) -> None:
-    """Explicit ``task_metadata`` wallclocks feed the cutoff, not the stale section defaults."""
+def test_relax_explicit_runtime_config_wallclock_wins(aiida_code_installed) -> None:
+    """Explicit ``runtime_config`` wallclocks feed the cutoff, not the stale section defaults."""
     code = aiida_code_installed(label='test.parity-relax-tm', default_calc_job_plugin='quantumespresso.pw')
     launch = protocols.get_inputs_from_protocol(
         'pw_relax',
@@ -132,7 +132,7 @@ def test_relax_explicit_task_metadata_wallclock_wins(aiida_code_installed) -> No
         code=code,
         pseudos={'Si': _upf()},
         overrides=_cutoffs('base_relax', 'base_init_relax'),
-        task_metadata={'main': {'pw_calc': {'options': {'max_wallclock_seconds': 999}}}},
+        runtime_config={'main': {'pw_calc': {'metadata': {'options': {'max_wallclock_seconds': 999}}}}},
     )
     assert launch['parameters'].get_dict()['CONTROL']['max_seconds'] == pytest.approx(999 * 0.95)
     assert launch['init_parameters'].get_dict()['CONTROL']['max_seconds'] == pytest.approx(_EXPECTED)
@@ -233,14 +233,17 @@ def test_production_relax_carries_cutoff_and_options(aiida_code_installed) -> No
     # Both static placements carry the same options; the launch mapping below is what the
     # production graph consumes.
     assert (
-        launch['task_metadata']['init_relax_guarded']['initial']['pw_calc']['options']['max_wallclock_seconds'] == 1111
+        launch['runtime_config']['init_relax_guarded']['initial']['pw_calc']['metadata']['options'][
+            'max_wallclock_seconds'
+        ]
+        == 1111
     )
-    assert launch['task_metadata']['main']['pw_calc']['options']['max_wallclock_seconds'] == 2222
+    assert launch['runtime_config']['main']['pw_calc']['metadata']['options']['max_wallclock_seconds'] == 2222
     assert (
-        launch['task_metadata']['init_relax_guarded']['initial']['pw_calc_monitored']
-        == launch['task_metadata']['init_relax_guarded']['initial']['pw_calc']
+        launch['runtime_config']['init_relax_guarded']['initial']['pw_calc_monitored']
+        == launch['runtime_config']['init_relax_guarded']['initial']['pw_calc']
     )
-    assert launch['task_metadata']['main']['pw_calc_monitored'] == launch['task_metadata']['main']['pw_calc']
+    assert launch['runtime_config']['main']['pw_calc_monitored'] == launch['runtime_config']['main']['pw_calc']
     assert launch['parameters'].get_dict()['CONTROL']['max_seconds'] == pytest.approx(2222 * 0.95)
     assert launch['init_parameters'].get_dict()['CONTROL']['max_seconds'] == pytest.approx(1111 * 0.95)
     assert pw_relax_graph.build() is None
@@ -268,10 +271,10 @@ def test_production_bands_per_stage_settings_and_cutoffs(aiida_code_installed) -
     assert launch['bands_settings'].get_dict() == {'cmdline': ['-nk', '4']}
     assert launch['scf_parameters'].get_dict()['CONTROL']['max_seconds'] == pytest.approx(1111 * 0.95)
     assert launch['bands_parameters'].get_dict()['CONTROL']['max_seconds'] == pytest.approx(2222 * 0.95)
-    assert launch['task_metadata']['scf']['pw_calc']['options']['max_wallclock_seconds'] == 1111
-    assert launch['task_metadata']['bands']['pw_calc']['options']['max_wallclock_seconds'] == 2222
-    assert launch['task_metadata']['scf']['pw_calc_monitored'] == launch['task_metadata']['scf']['pw_calc']
-    assert launch['task_metadata']['bands']['pw_calc_monitored'] == launch['task_metadata']['bands']['pw_calc']
+    assert launch['runtime_config']['scf']['pw_calc']['metadata']['options']['max_wallclock_seconds'] == 1111
+    assert launch['runtime_config']['bands']['pw_calc']['metadata']['options']['max_wallclock_seconds'] == 2222
+    assert launch['runtime_config']['scf']['pw_calc_monitored'] == launch['runtime_config']['scf']['pw_calc']
+    assert launch['runtime_config']['bands']['pw_calc_monitored'] == launch['runtime_config']['bands']['pw_calc']
     assert pw_bands_graph.build() is None
 
 
@@ -308,10 +311,10 @@ def test_conflicting_pw_leaves_fail_fast(aiida_code_installed) -> None:
             code=code,
             pseudos={'Si': _upf()},
             overrides=_cutoffs('base_relax', 'base_init_relax'),
-            task_metadata={
+            runtime_config={
                 'main': {
-                    'pw_calc': {'options': {'max_wallclock_seconds': 111}},
-                    'pw_calc_monitored': {'options': {'max_wallclock_seconds': 222}},
+                    'pw_calc': {'metadata': {'options': {'max_wallclock_seconds': 111}}},
+                    'pw_calc_monitored': {'metadata': {'options': {'max_wallclock_seconds': 222}}},
                 }
             },
         )
@@ -319,11 +322,16 @@ def test_conflicting_pw_leaves_fail_fast(aiida_code_installed) -> None:
 
 def test_duplicate_pw_leaves_single_sided_and_conflict() -> None:
     """Single-sided overrides duplicate onto the sibling; conflicting siblings name the scope."""
-    single = protocols._duplicate_pw_leaves({'scope': {'pw_calc': {'options': {'a': 1}}}})
-    assert single['scope']['pw_calc_monitored'] == single['scope']['pw_calc'] == {'options': {'a': 1}}
-    with pytest.raises(ValueError, match=r'task_metadata\.scope'):
+    single = protocols._duplicate_pw_leaves({'scope': {'pw_calc': {'metadata': {'options': {'a': 1}}}}})
+    assert single['scope']['pw_calc_monitored'] == single['scope']['pw_calc'] == {'metadata': {'options': {'a': 1}}}
+    with pytest.raises(ValueError, match=r'runtime_config\.scope'):
         protocols._duplicate_pw_leaves(
-            {'scope': {'pw_calc': {'options': {'a': 1}}, 'pw_calc_monitored': {'options': {'a': 2}}}}
+            {
+                'scope': {
+                    'pw_calc': {'metadata': {'options': {'a': 1}}},
+                    'pw_calc_monitored': {'metadata': {'options': {'a': 2}}},
+                }
+            }
         )
 
 
@@ -400,7 +408,7 @@ def test_relax_fixed_coords_preserved_per_stage(aiida_code_installed) -> None:
     assert 'main_key' not in init_settings
 
 
-def test_task_metadata_wallclock_precedence_for_cutoff(aiida_code_installed) -> None:
+def test_runtime_config_wallclock_precedence_for_cutoff(aiida_code_installed) -> None:
     """Explicit per-scope wallclocks beat global options; untouched scopes keep the global."""
     code = aiida_code_installed(label='test.parity-precedence', default_calc_job_plugin='quantumespresso.pw')
     launch = protocols.get_inputs_from_protocol(
@@ -410,12 +418,12 @@ def test_task_metadata_wallclock_precedence_for_cutoff(aiida_code_installed) -> 
         pseudos={'Si': _upf()},
         overrides=_cutoffs('base_relax', 'base_init_relax'),
         options={'max_wallclock_seconds': 3600},
-        task_metadata={'main': {'pw_calc': {'options': {'max_wallclock_seconds': 555}}}},
+        runtime_config={'main': {'pw_calc': {'metadata': {'options': {'max_wallclock_seconds': 555}}}}},
     )
     assert launch['parameters'].get_dict()['CONTROL']['max_seconds'] == pytest.approx(555 * 0.95)
     assert launch['init_parameters'].get_dict()['CONTROL']['max_seconds'] == pytest.approx(3600 * 0.95)
-    assert launch['task_metadata']['main']['pw_calc']['options']['max_wallclock_seconds'] == 555
-    assert launch['task_metadata']['main']['pw_calc_monitored'] == launch['task_metadata']['main']['pw_calc']
+    assert launch['runtime_config']['main']['pw_calc']['metadata']['options']['max_wallclock_seconds'] == 555
+    assert launch['runtime_config']['main']['pw_calc_monitored'] == launch['runtime_config']['main']['pw_calc']
 
 
 def test_relax_protocol_disables_inheritance(aiida_code_installed) -> None:

@@ -138,7 +138,7 @@ def test_ph_base_graph_recover_merges_real_wiring(monkeypatch, aiida_code_instal
         parent_folder=parent,
         parameters=dict(PH_PARAMETERS),
         qpoints=_qpoints(),
-        task_metadata={'ph_calc': {'options': {}}},
+        runtime_config={'ph_calc': {'metadata': {'options': {}}}},
     )
     assert node.is_finished_ok, node.exit_message
     assert outputs['report'].get_dict() == {'attempts': 2, 'status': 'finished'}
@@ -184,7 +184,7 @@ def test_ph_base_graph_only_initialization_returns_existing(monkeypatch, aiida_c
         parameters=dict(PH_PARAMETERS),
         qpoints=_qpoints(),
         only_initialization=True,
-        task_metadata={'ph_calc': {'options': {}}},
+        runtime_config={'ph_calc': {'metadata': {'options': {}}}},
     )
     assert node.is_finished_ok, node.exit_message
     assert outputs['report'].get_dict() == {'attempts': 1, 'status': 'finished'}

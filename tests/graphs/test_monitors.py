@@ -86,7 +86,7 @@ def _pw_metadata() -> dict:
     ``monitors.stuck``) placements need a scope since only one branch executes
     per launch but validation covers every placement.
     """
-    return {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}}
+    return {'pw_calc': {'metadata': {'options': {}}}, 'pw_calc_monitored': {'metadata': {'options': {}}}}
 
 
 class _MonitorStubBase(PwCalculation):
@@ -330,16 +330,17 @@ def test_handle_pw_monitor_stuck_ignores_other_diagnostics() -> None:
 
 
 @pytest.mark.usefixtures('aiida_profile_clean')
-def test_pw_base_graph_monitor_recovers_real_wiring(monkeypatch, aiida_code_installed) -> None:
-    """The production graph recovers a stuck ``relax`` run through forwarded monitors.
-
-    The stub stops only while ``upscale`` is at its default, so the second attempt
-    succeeding proves the handler's reduction drove the recovery. The asserted
-    ``monitors__stuck`` incoming link proves the forwarded mapping reached the
-    failed calculation; nothing here monkeypatches the handler.
-    """
+@pytest.mark.parametrize('configure_monitors', [False, True], ids=['graph-input', 'runtime-config'])
+def test_pw_base_graph_monitor_recovers_real_wiring(
+    monkeypatch, aiida_code_installed, configure_monitors: bool
+) -> None:
+    """Both graph-wired and launch-configured monitors trigger the same QE recovery."""
     _substitute(monkeypatch, StuckRelaxPwCalc)
     code = aiida_code_installed(label='test.pw-monitor', default_calc_job_plugin='quantumespresso.pw')
+    monitors = _monitors()
+    config = _pw_metadata()
+    if configure_monitors:
+        config['pw_calc']['monitors'] = {'stuck': orm.Dict(monitors['stuck'].get_dict())}
     outputs, node = run_get_node(
         base.pw_base_graph,
         code=code,
@@ -347,8 +348,8 @@ def test_pw_base_graph_monitor_recovers_real_wiring(monkeypatch, aiida_code_inst
         pseudos=_pseudos('Si'),
         parameters={'CONTROL': {'calculation': 'relax'}, 'SYSTEM': {}, 'ELECTRONS': {}},
         kpoints=_kpoints(),
-        monitors=_monitors(),
-        task_metadata=_pw_metadata(),
+        monitors=None if configure_monitors else monitors,
+        runtime_config=config,
     )
     assert node.is_finished_ok, node.exit_message
     assert outputs['report'].get_dict() == {'attempts': 2, 'status': 'finished'}
@@ -379,7 +380,7 @@ def test_pw_base_graph_monitor_scf_restarts_unchanged(monkeypatch, aiida_code_in
         parameters=dict(parameters),
         kpoints=_kpoints(),
         monitors=_monitors(),
-        task_metadata=_pw_metadata(),
+        runtime_config=_pw_metadata(),
     )
     assert node.is_finished_ok, node.exit_message
     assert outputs['report'].get_dict() == {'attempts': 2, 'status': 'finished'}
@@ -407,7 +408,7 @@ def test_pw_base_graph_unmonitored_run_skips_monitor_stop(monkeypatch, aiida_cod
         pseudos=_pseudos('Si'),
         parameters={'CONTROL': {'calculation': 'relax'}, 'SYSTEM': {}, 'ELECTRONS': {}},
         kpoints=_kpoints(),
-        task_metadata=_pw_metadata(),
+        runtime_config=_pw_metadata(),
     )
     assert node.is_finished_ok, node.exit_message
     assert outputs['report'].get_dict() == {'attempts': 1, 'status': 'finished'}
@@ -433,11 +434,12 @@ def test_pw_base_graph_other_diagnostic_fails_loudly(monkeypatch, aiida_code_ins
         kpoints=_kpoints(),
         monitors=_monitors(),
         max_iterations=2,
-        task_metadata=_pw_metadata(),
+        runtime_config=_pw_metadata(),
     )
     assert not node.is_finished_ok
     assert outputs == {}
-    assert 'ensure_pw_recovered' in (node.exit_message or '')
+    assert node.exit_status == 402
+    assert node.exit_message == 'The process failed with an unhandled failure.'
     children = [child for child in node.called if child.process_label == 'OtherReasonPwCalc']
     assert len(children) == 2
     for child in children:
@@ -459,11 +461,12 @@ def test_pw_base_graph_bare_stop_fails_loudly(monkeypatch, aiida_code_installed)
         kpoints=_kpoints(),
         monitors=_monitors(),
         max_iterations=2,
-        task_metadata=_pw_metadata(),
+        runtime_config=_pw_metadata(),
     )
     assert not node.is_finished_ok
     assert outputs == {}
-    assert 'ensure_pw_recovered' in (node.exit_message or '')
+    assert node.exit_status == 402
+    assert node.exit_message == 'The process failed with an unhandled failure.'
     children = [child for child in node.called if child.process_label == 'BareStopPwCalc']
     assert len(children) == 2
     for child in children:
@@ -613,7 +616,7 @@ def test_pw_base_graph_invalid_monitor_key_fails_fast(monkeypatch, aiida_code_in
         parameters={'CONTROL': {'calculation': 'relax'}, 'SYSTEM': {}, 'ELECTRONS': {}},
         kpoints=_kpoints(),
         monitors=orm.DataDict({'other': orm.Dict({'entry_point': 'x', 'kwargs': {}})}),
-        task_metadata=_pw_metadata(),
+        runtime_config=_pw_metadata(),
     )
     assert not node.is_finished_ok
     assert 'resolve_stuck_monitor' in (node.exit_message or '')
@@ -632,7 +635,7 @@ def test_pw_base_graph_empty_monitors_run_unmonitored(monkeypatch, aiida_code_in
         parameters={'CONTROL': {'calculation': 'relax'}, 'SYSTEM': {}, 'ELECTRONS': {}},
         kpoints=_kpoints(),
         monitors=orm.DataDict({}),
-        task_metadata=_pw_metadata(),
+        runtime_config=_pw_metadata(),
     )
     assert node.is_finished_ok, node.exit_message
     assert outputs['report'].get_dict() == {'attempts': 1, 'status': 'finished'}

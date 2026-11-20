@@ -39,41 +39,41 @@ branch-dependent ``after``: each variant hard-codes its own ordering.
 Scheduler options
 -----------------
 
-``CalcJob`` scheduler options travel at launch under ``task_metadata`` as a
+``CalcJob`` scheduler options travel at launch under ``runtime_config`` as a
 strictly nested mapping, not through graph inputs. Each authored subgraph
 callee alias adds one level; the ``CalcJob`` placement alias holds the normal
-metadata mapping at the leaf. The stage scopes nest the ``nscf`` base alias
+process input mapping (with a ``metadata`` key) at the leaf. The stage scopes nest the ``nscf`` base alias
 plus the ``dos_calc``/``projwfc_calc`` placements; a from-scratch root nests
 the ``scf`` base scope beside its stage scope. Each ``pw`` scope carries both
 static placements (``pw_calc`` unmonitored plus ``pw_calc_monitored``) with
 identical scheduler options::
 
-    task_metadata = {
+    runtime_config = {
         'pdos_stage_serial': {
-            'nscf': {'pw_calc': {'options': nscf_options},
-                     'pw_calc_monitored': {'options': nscf_options}},
-            'dos_calc': {'options': dos_options},
-            'projwfc_calc': {'options': projwfc_options},
+            'nscf': {'pw_calc': {'metadata': {'options': nscf_options}},
+                     'pw_calc_monitored': {'metadata': {'options': nscf_options}}},
+            'dos_calc': {'metadata': {'options': dos_options}},
+            'projwfc_calc': {'metadata': {'options': projwfc_options}},
         },
     }
-    task_metadata = {
-        'scf': {'pw_calc': {'options': scf_options},
-                'pw_calc_monitored': {'options': scf_options}},
+    runtime_config = {
+        'scf': {'pw_calc': {'metadata': {'options': scf_options}},
+                'pw_calc_monitored': {'metadata': {'options': scf_options}}},
         'pdos_stage_serial': {
-            'nscf': {'pw_calc': {'options': nscf_options},
-                     'pw_calc_monitored': {'options': nscf_options}},
-            'dos_calc': {'options': dos_options},
-            'projwfc_calc': {'options': projwfc_options},
+            'nscf': {'pw_calc': {'metadata': {'options': nscf_options}},
+                     'pw_calc_monitored': {'metadata': {'options': nscf_options}}},
+            'dos_calc': {'metadata': {'options': dos_options}},
+            'projwfc_calc': {'metadata': {'options': projwfc_options}},
         },
     }
 
 Branch and loop control frames are transparent: the serial variant's ordered
 sweeps add no key level. The experimental per-bundle ``options`` ports of the
 previous revision were removed rather than silently ignored. Form the launch
-mapping with :func:`task_metadata_for_options
-<aiida_quantumespresso.workflows.graphs.protocols.task_metadata_for_options>`
-or as a literal nested mapping; unknown paths, missing entries, and
-non-mapping leaves fail loudly at launch.
+mapping with :func:`runtime_config_for_placements
+<aiida_quantumespresso.workflows.graphs.protocols.runtime_config_for_placements>`
+or as a literal nested mapping. Unknown paths and non-mapping leaves
+fail at launch; omitted leaves use process defaults where available.
 
 Honest limits of this rewrite (see ``reports/STATUS.md``):
 
@@ -111,13 +111,6 @@ from aiida_quantumespresso.calculations.dos import DosCalculation
 from aiida_quantumespresso.calculations.projwfc import ProjwfcCalculation
 from aiida_quantumespresso.workflows.graphs.base import pw_base_graph
 
-# Authored callee aliases: repeated calls to the same subgraph are told apart by
-# the name used at the call site, so each metadata-bearing placement gets its own
-# module-level alias. The structured ``task_metadata`` descends one level per
-# alias (``{'scf': {'pw_calc': ...}}``); the ``dos_calc``/``projwfc_calc``
-# calculation tasks keep their own stable names as leaves.
-scf = pw_base_graph
-nscf = pw_base_graph
 
 __all__ = (
     'MatchedParameters',
@@ -512,7 +505,7 @@ def pdos_stage_parallel(
         parent_parameters=parent_output_parameters,
         nbands_factor=nbands_factor,
     )
-    nscf_run = nscf(
+    nscf_run = pw_base_graph.alias('nscf')(
         code=pw_code,
         structure=structure,
         pseudos=pseudos,
@@ -639,7 +632,7 @@ def pdos_stage_serial(
         parent_parameters=parent_output_parameters,
         nbands_factor=nbands_factor,
     )
-    nscf_run = nscf(
+    nscf_run = pw_base_graph.alias('nscf')(
         code=pw_code,
         structure=structure,
         pseudos=pseudos,
@@ -678,7 +671,9 @@ def pdos_stage_serial(
         parent_folder=nscf_run.remote_folder,
         after=dos_swept,
     )
-    projwfc_swept = sweep_remote(folder=projwfc_run.remote_folder, enabled=True, after=projwfc_run)
+    projwfc_swept = sweep_remote.alias('projwfc_swept')(
+        folder=projwfc_run.remote_folder, enabled=True, after=projwfc_run
+    )
     swept = sweep_stage(  # noqa: F841
         nscf_folder=nscf_run.remote_folder,
         dos_folder=dos_run.remote_folder,
@@ -748,7 +743,7 @@ def pdos_from_scratch_parallel(
     The SCF base run feeds its remote folder and band count into the shared
     parallel stage. The SCF remote is swept at the end only when
     ``clean_workdir`` holds. Scheduler options ride at launch under
-    ``task_metadata`` (see the module docstring).
+    ``runtime_config`` (see the module docstring).
 
     :param structure: the structure to compute the DOS of.
     :param pw_code: the ``quantumespresso.pw`` code of the SCF and NSCF runs.
@@ -776,7 +771,7 @@ def pdos_from_scratch_parallel(
     :return: the SCF products, the stage products, and the summary report.
     """
     checked_scf_parameters = require_scf_parameters(parameters=scf_parameters)
-    scf_run = scf(
+    scf_run = pw_base_graph.alias('scf')(
         code=pw_code,
         structure=structure,
         pseudos=pseudos,
@@ -810,7 +805,7 @@ def pdos_from_scratch_parallel(
         monitors=nscf_monitors if nscf_monitors is not None else monitors,
         after=scf_checked,
     )
-    scf_final = sweep_remote(folder=scf_run.remote_folder, enabled=clean_workdir, after=stage)  # noqa: F841
+    scf_final = sweep_remote.alias('scf_final')(folder=scf_run.remote_folder, enabled=clean_workdir, after=stage)  # noqa: F841
     return {
         'scf_remote_folder': scf_run.remote_folder,
         'scf_output_parameters': scf_run.output_parameters,
@@ -893,7 +888,7 @@ def pdos_from_scratch_serial(
     :return: the SCF products, the stage products, and the summary report.
     """
     checked_scf_parameters = require_scf_parameters(parameters=scf_parameters)
-    scf_run = scf(
+    scf_run = pw_base_graph.alias('scf')(
         code=pw_code,
         structure=structure,
         pseudos=pseudos,
@@ -928,7 +923,7 @@ def pdos_from_scratch_serial(
         after=scf_checked,
     )
     scf_swept = sweep_remote(folder=scf_run.remote_folder, enabled=True, after=stage)
-    scf_final = sweep_remote(folder=scf_run.remote_folder, enabled=clean_workdir, after=scf_swept)  # noqa: F841
+    scf_final = sweep_remote.alias('scf_final')(folder=scf_run.remote_folder, enabled=clean_workdir, after=scf_swept)  # noqa: F841
     return {
         'scf_remote_folder': scf_run.remote_folder,
         'scf_output_parameters': scf_run.output_parameters,
@@ -983,7 +978,7 @@ def pdos_from_parent_parallel(
     Mirrors the legacy chain without the ``scf`` inputs: the caller hands over
     the NSCF parent folder directly. ``parent_output_parameters`` only matters
     with ``nbands_factor``. Scheduler options ride at launch under
-    ``task_metadata`` (see the module docstring).
+    ``runtime_config`` (see the module docstring).
 
     :param structure: the structure to compute the DOS of.
     :param parent_folder: the remote folder the NSCF run restarts from.

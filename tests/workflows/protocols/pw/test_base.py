@@ -669,9 +669,10 @@ def test_silicon_family_ignores_owned_duplicates(generate_upf_data, generate_sil
     the stored owned copies share the md5 checksum. Creating a fixture family afterwards must still
     succeed with fresh standalone nodes instead of trying to group the owned copies.
     """
-    from aiida.orm.nodes.data.container import is_owned
     from aiida_pseudo.groups.family import PseudoPotentialFamily
 
+    container_module = pytest.importorskip('aiida.orm.nodes.data.container')
+    is_owned = container_module.is_owned
     upf = generate_upf_data('Si')
     container = orm.DataDict({'Si': upf})
     container.store()

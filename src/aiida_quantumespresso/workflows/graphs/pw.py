@@ -26,37 +26,37 @@ and validate without launching anything with ``assert pw_relax_graph.build() is 
 Scheduler options
 -----------------
 
-``CalcJob`` scheduler options travel at launch under ``task_metadata`` as a
+``CalcJob`` scheduler options travel at launch under ``runtime_config`` as a
 strictly nested mapping, not through graph inputs. Each authored subgraph
 callee alias adds one level; the ``CalcJob`` placement alias holds the normal
-metadata mapping at the leaf. Branch and loop control frames are transparent:
+process input mapping (with a ``metadata`` key) at the leaf. Branch and loop control frames are transparent:
 iterations reuse their placement's configuration and add no key level. The
 relax scopes are the initial wrapper plus its inner alias and the main-loop
 alias; the bands scopes are ``scf`` and ``bands``. Each ``pw`` scope carries
 both static placements (``pw_calc`` unmonitored plus ``pw_calc_monitored``)
 with identical scheduler options::
 
-    task_metadata = {
-        'init_relax_guarded': {'initial': {'pw_calc': {'options': init_options},
-                                           'pw_calc_monitored': {'options': init_options}}},
-        'main': {'pw_calc': {'options': main_options},
-                 'pw_calc_monitored': {'options': main_options}},
+    runtime_config = {
+        'init_relax_guarded': {'initial': {'pw_calc': {'metadata': {'options': init_options}},
+                                           'pw_calc_monitored': {'metadata': {'options': init_options}}}},
+        'main': {'pw_calc': {'metadata': {'options': main_options}},
+                 'pw_calc_monitored': {'metadata': {'options': main_options}}},
     }
-    task_metadata = {
-        'scf': {'pw_calc': {'options': scf_options},
-                'pw_calc_monitored': {'options': scf_options}},
-        'bands': {'pw_calc': {'options': bands_options},
-                  'pw_calc_monitored': {'options': bands_options}},
+    runtime_config = {
+        'scf': {'pw_calc': {'metadata': {'options': scf_options}},
+                'pw_calc_monitored': {'metadata': {'options': scf_options}}},
+        'bands': {'pw_calc': {'metadata': {'options': bands_options}},
+                  'pw_calc_monitored': {'metadata': {'options': bands_options}}},
     }
 
 The experimental ``options`` ports of the previous revision were removed rather
 than silently ignored: passing scheduler options through a graph ``Dict``
 input would suggest per-iteration control that the native base graph does not
 offer (its options are constant across iterations). Form the launch mapping
-with :func:`task_metadata_for_options
-<aiida_quantumespresso.workflows.graphs.protocols.task_metadata_for_options>`
-or as a literal nested mapping; unknown paths, missing entries, and
-non-mapping leaves fail loudly at launch.
+with :func:`runtime_config_for_placements
+<aiida_quantumespresso.workflows.graphs.protocols.runtime_config_for_placements>`
+or as a literal nested mapping. Unknown paths and non-mapping leaves
+fail at launch; omitted leaves use process defaults where available.
 
 Honest limits of this rewrite (see ``reports/STATUS.md``):
 
@@ -65,7 +65,7 @@ Honest limits of this rewrite (see ``reports/STATUS.md``):
   kpoints?, kpoints_distance?, kpoints_force_parity?, parent_folder?)`` returning
   ``output_parameters``/``output_structure?``/``output_band?``/``output_trajectory?``/
   ``remote_folder``/``report``. Pseudopotentials travel as a ``DataDict`` (kind name to ``UpfData``).
-  Each composite below calls it only through the module-level aliases
+  Each composite below calls it only through the inline aliases
   (``scf``/``bands``/``initial``/``main``), each containing the base's dual
   ``pw_calc``/``pw_calc_monitored`` placements (identical scheduler options on
   both leaves). Considered-finished base outcomes (``501``
@@ -121,15 +121,6 @@ from aiida_quantumespresso.calculations.functions.seekpath_structure_analysis im
 from aiida_quantumespresso.workflows.graphs.base import pw_base_graph
 from aiida_quantumespresso.utils.validation.trajectory import verify_convergence_stress
 
-# Authored callee aliases: repeated calls to the same subgraph are told apart by
-# the name used at the call site, so each metadata-bearing placement gets its own
-# module-level alias. The structured ``task_metadata`` descends one level per
-# alias (``{'scf': {'pw_calc': ...}}``); loop iterations and branch arms share
-# their placement's configuration and add no level of their own.
-scf = pw_base_graph
-bands = pw_base_graph
-initial = pw_base_graph
-main = pw_base_graph
 
 # Undecorated twins of the ``calcfunction`` implementations above. Graph tasks run as calculation processes and so
 # cannot call a decorated ``calcfunction`` (the engine forbids it); calling the shared undecorated implementation
@@ -618,7 +609,7 @@ def init_relax_guarded(
         init_kpoints_force_parity=init_kpoints_force_parity,
         init_monitors=init_monitors,
     )
-    base = initial(
+    base = pw_base_graph.alias('initial')(
         code=code,
         structure=structure,
         pseudos=pseudos,
@@ -670,7 +661,7 @@ def pw_relax_graph(
     lasts, then a summary task records the outcome. The root returns the existing final structure, the summary
     node, and the final base run's outputs (``output_parameters``, ``remote_folder``, ``output_trajectory``,
     ``output_band``, ``output_kpoints``, ``output_atomic_occupations``); unset leaves stay out of the emitted
-    outputs when the loop never runs. Scheduler options ride at launch under ``task_metadata`` (see the module docstring); there is no
+    outputs when the loop never runs. Scheduler options ride at launch under ``runtime_config`` (see the module docstring); there is no
     per-iteration ``options`` port.
 
     :param structure: the structure to relax.
@@ -730,7 +721,7 @@ def pw_relax_graph(
     final_output_atomic_occupations = seed.output_atomic_occupations
     final_remote_folder = seed.remote_folder
     while rerun and attempts < max_iterations:
-        step = main(
+        step = pw_base_graph.alias('main')(
             code=code,
             structure=current,
             pseudos=pseudos,
@@ -821,7 +812,7 @@ def pw_bands_graph(
     """Compute a band structure along a SeekPath path (or explicit k-points) through SCF plus bands runs.
 
     The path adapter normalizes the structure unless explicit bands k-points are given; the SCF run feeds its remote
-    folder and band count into the bands run. Scheduler options ride at launch under ``task_metadata`` (see the
+    folder and band count into the bands run. Scheduler options ride at launch under ``runtime_config`` (see the
     module docstring); there are no per-run ``options`` ports. The root returns the existing step outputs, leaving
     the SeekPath leaves out when explicit k-points were given.
 
@@ -850,7 +841,7 @@ def pw_bands_graph(
         scf_structure = path.primitive_structure
     else:
         scf_structure = structure
-    scf_run = scf(
+    scf_run = pw_base_graph.alias('scf')(
         code=scf_code,
         structure=scf_structure,
         pseudos=pseudos,
@@ -867,7 +858,7 @@ def pw_bands_graph(
         nbands_factor=nbands_factor,
         after=scf_checked,
     )
-    bands_run = bands(
+    bands_run = pw_base_graph.alias('bands')(
         code=bands_code,
         structure=scf_structure,
         pseudos=pseudos,
@@ -877,7 +868,7 @@ def pw_bands_graph(
         parent_folder=scf_run.remote_folder,
         monitors=bands_monitors if bands_monitors is not None else monitors,
     )
-    bands_checked = require_base_finished(report=bands_run.report, stage='bands')  # noqa: F841
+    bands_checked = require_base_finished.alias('check_bands')(report=bands_run.report, stage='bands')  # noqa: F841
     return {
         'band_structure': bands_run.output_band,
         'scf_parameters': scf_run.output_parameters,

@@ -13,7 +13,7 @@ plain data, exactly as the legacy work chains consume them. It never resolves
 pseudos, cutoffs, or thresholds.
 
 :func:`get_inputs_from_protocol` translates that YAML nesting into launch-ready
-native graph arguments plus a ``task_metadata`` mapping. It resolves one
+native graph arguments plus a ``runtime_config`` mapping. It resolves one
 pseudo set (explicit ``UpfData`` nodes or an ``aiida-pseudo`` family with
 recommended cutoffs), per-atom ``conv_thr``/``etot_conv_thr`` thresholds,
 k-point distances, the requested electronic/spin settings, and the optional
@@ -25,22 +25,22 @@ subclass or a ``ProcessBuilder``.
 
 Scheduler options are not graph inputs. The helper lifts every
 ``pw.metadata.options``/``dos.metadata.options``/``projwfc.metadata.options``
-section into the ``task_metadata`` launch mapping as a strictly nested mapping,
+section into the ``runtime_config`` launch mapping as a strictly nested mapping,
 and merges the ``options`` keyword into every placement. Each authored subgraph
 callee alias adds one level (for example ``{'scf': {'pw_calc': ..., 'pw_calc_monitored': ...},
 'bands': {...}}`` for the bands root); the ``CalcJob`` placement alias holds
-the normal metadata mapping at the leaf. Every ``pw`` scope carries both static placements
+the process input mapping (with a ``metadata`` key) at the leaf. Every ``pw`` scope carries both static placements
 (``pw_calc`` unmonitored plus ``pw_calc_monitored``) with identical scheduler options. Branch and loop control frames are
 transparent, and loop iterations reuse their placement's configuration, so no
-generated suffixes or per-iteration keys appear. The mapping covers every
-``CalcJob`` placement exactly once: unknown paths, missing entries, and
-non-mapping leaves fail loudly at launch. See
+generated suffixes or per-iteration keys appear. The protocol supplies
+scheduler options for every ``CalcJob`` placement. Unknown paths and
+non-mapping leaves fail at launch. See
 ``reports/STATUS.md`` for the scope contract and the
 authored aliases of each production root.
 
 The QE ``CONTROL.max_seconds`` cutoff is prepared per ``pw`` placement at launch:
 when the resolved ``CONTROL`` parameters carry no explicit ``max_seconds`` and the final
-``task_metadata`` leaf for that placement holds ``options.max_wallclock_seconds``, the helper
+``runtime_config`` leaf holds ``metadata.options.max_wallclock_seconds``, the helper
 seeds ``0.95`` of the wallclock (mirroring ``PwBaseWorkChain.prepare_process``); an explicit
 ``max_seconds`` always wins and a placement without a wallclock gets no cutoff. The cutoff is
 constant across base-loop retries, matching the fixed scheduler options.
@@ -94,8 +94,8 @@ __all__ = (
     'get_inputs_from_protocol',
     'get_protocol_filepath',
     'get_protocol_inputs',
-    'pdos_protocol_task_metadata',
-    'task_metadata_for_options',
+    'pdos_protocol_runtime_config',
+    'runtime_config_for_placements',
 )
 
 PROTOCOL_KINDS = ('pw_relax', 'pw_bands', 'pdos')
@@ -687,7 +687,7 @@ def _placement_metadata(section_options: dict, global_options: dict | None, code
     computer = code.computer if code is not None else None
     if computer is not None and computer.scheduler_type:
         merged = ProtocolMixin.set_default_resources(merged, computer.scheduler_type)
-    return {'options': merged}
+    return {'metadata': {'options': merged}}
 
 
 def _pw_scope_metadata(section_options: dict, global_options: dict | None, code: orm.Code | None) -> dict:
@@ -702,10 +702,10 @@ def _pw_scope_metadata(section_options: dict, global_options: dict | None, code:
     return {'pw_calc': metadata, 'pw_calc_monitored': copy.deepcopy(metadata)}
 
 
-def _duplicate_pw_leaves(node: t.Any, _path: str = 'task_metadata') -> t.Any:
+def _duplicate_pw_leaves(node: t.Any, _path: str = 'runtime_config') -> t.Any:
     """Duplicate a single-sided ``pw_calc``/``pw_calc_monitored`` override onto its sibling.
 
-    Explicit ``task_metadata`` overrides name one leaf per scope; without duplication the
+    Explicit ``runtime_config`` overrides name one leaf per scope; without duplication the
     sibling would keep the protocol default and the two placements would desynchronize.
     Scopes stay independent: only leaves under the same parent are synchronized.
 
@@ -736,16 +736,17 @@ def _duplicate_pw_leaves(node: t.Any, _path: str = 'task_metadata') -> t.Any:
     return duplicated
 
 
-def _placement_options(task_metadata: dict | None, *path: str) -> dict:
-    """Return the scheduler ``options`` leaf of a merged ``task_metadata`` mapping at one placement path."""
-    node: t.Any = task_metadata or {}
+def _placement_options(runtime_config: dict | None, *path: str) -> dict:
+    """Return the scheduler ``options`` leaf of a merged ``runtime_config`` mapping at one placement path."""
+    node: t.Any = runtime_config or {}
     for key in path:
         if not isinstance(node, dict):
             return {}
         node = node.get(key, {})
     if not isinstance(node, dict):
         return {}
-    options = node.get('options', {})
+    metadata = node.get('metadata', {})
+    options = metadata.get('options', {}) if isinstance(metadata, dict) else {}
     return dict(options) if isinstance(options, dict) else {}
 
 
@@ -884,7 +885,7 @@ def get_inputs_from_protocol(
     parent_output_parameters: orm.Dict | dict | None = None,
     serial: bool = False,
     options: dict | None = None,
-    task_metadata: dict | None = None,
+    runtime_config: dict | None = None,
     monitors: orm.DataDict | dict | None = None,
     scf_monitors: orm.DataDict | dict | None = None,
     bands_monitors: orm.DataDict | dict | None = None,
@@ -896,7 +897,7 @@ def get_inputs_from_protocol(
     The returned mapping splats directly into :func:`run_get_node`/:func:`submit`
     for the matching production root (``pw_relax_graph``, ``pw_bands_graph``,
     or a ``pdos_from_*`` root): graph arguments as plain values and ORM nodes,
-    plus a strictly nested ``task_metadata`` entry (one level per authored
+    plus a strictly nested ``runtime_config`` entry (one level per authored
     subgraph callee alias, the ``CalcJob`` metadata mapping at each leaf).
     Pseudo, cutoff,
     threshold, k-point, and spin resolution mirrors
@@ -926,16 +927,16 @@ def get_inputs_from_protocol(
     :param nscf_kpoints: explicit NSCF mesh for ``'pdos'``.
     :param parent_folder: when given for ``'pdos'``, build from-parent inputs instead of from-scratch.
     :param parent_output_parameters: parent ``output_parameters`` for the PDOS band-count rule.
-    :param serial: select the serial PDOS root (and its ``task_metadata`` stage scope).
+    :param serial: select the serial PDOS root (and its ``runtime_config`` stage scope).
     :param options: scheduler options merged into every CalcJob placement.
-    :param task_metadata: explicit placement metadata merged last, winning on conflicts.
+    :param runtime_config: explicit placement metadata merged last, winning on conflicts.
     :param monitors: shared monitors forwarded into every nested ``pw_base_graph`` unless a
         per-stage override wins.
     :param scf_monitors: optional SCF monitors for ``'pw_bands'``/``'pdos'``, defaulting to ``monitors``.
     :param bands_monitors: optional bands monitors for ``'pw_bands'``, defaulting to ``monitors``.
     :param nscf_monitors: optional NSCF monitors for ``'pdos'``, defaulting to ``monitors``.
     :param init_monitors: optional initial-relax monitors for ``'pw_relax'``, defaulting to ``monitors``.
-    :return: the launch inputs, including ``task_metadata``.
+    :return: the launch inputs, including ``runtime_config``.
     :raises ValueError: for unsupported protocol options, conflicting shared inputs, or missing codes.
     """
     if kind not in PROTOCOL_KINDS:
@@ -1009,7 +1010,7 @@ def get_inputs_from_protocol(
             kpoints=kpoints,
             init_kpoints=init_kpoints,
             options=options,
-            task_metadata=task_metadata,
+            runtime_config=runtime_config,
             monitors=_coerce_monitors_input(monitors, 'monitors'),
             init_monitors=_coerce_monitors_input(init_monitors, 'init_monitors'),
         )
@@ -1029,7 +1030,7 @@ def get_inputs_from_protocol(
             scf_kpoints=scf_kpoints,
             bands_kpoints=bands_kpoints,
             options=options,
-            task_metadata=task_metadata,
+            runtime_config=runtime_config,
             monitors=_coerce_monitors_input(monitors, 'monitors'),
             scf_monitors=_coerce_monitors_input(scf_monitors, 'scf_monitors'),
             bands_monitors=_coerce_monitors_input(bands_monitors, 'bands_monitors'),
@@ -1053,7 +1054,7 @@ def get_inputs_from_protocol(
         parent_output_parameters=parent_output_parameters,
         serial=serial,
         options=options,
-        task_metadata=task_metadata,
+        runtime_config=runtime_config,
         monitors=_coerce_monitors_input(monitors, 'monitors'),
         scf_monitors=_coerce_monitors_input(scf_monitors, 'scf_monitors'),
         nscf_monitors=_coerce_monitors_input(nscf_monitors, 'nscf_monitors'),
@@ -1101,7 +1102,7 @@ def _resolve_sections(
     }
 
 
-def _merge_task_metadata(*mappings: dict | None) -> dict:
+def _merge_runtime_config(*mappings: dict | None) -> dict:
     """Merge placement metadata mappings left to right, with the rightmost winning.
 
     Single-sided ``pw_calc``/``pw_calc_monitored`` overrides are duplicated onto
@@ -1115,12 +1116,12 @@ def _merge_task_metadata(*mappings: dict | None) -> dict:
         if mapping is None:
             continue
         if not isinstance(mapping, dict):
-            msg = '`task_metadata` must be a mapping of authored placement names.'
+            msg = '`runtime_config` must be a mapping of authored placement names.'
             raise ValueError(msg)
         mapping = _duplicate_pw_leaves(mapping)
         for placement, metadata in mapping.items():
             if not isinstance(metadata, dict):
-                msg = f'`task_metadata.{placement}` must be a mapping.'
+                msg = f'`runtime_config.{placement}` must be a mapping.'
                 raise ValueError(msg)
             merged[placement] = _recursive_merge(merged.get(placement, {}), copy.deepcopy(metadata))
     _duplicate_pw_leaves(merged)
@@ -1143,7 +1144,7 @@ def _relax_launch_inputs(
     kpoints: orm.KpointsData | None,
     init_kpoints: orm.KpointsData | None,
     options: dict | None,
-    task_metadata: dict | None,
+    runtime_config: dict | None,
     monitors: orm.DataDict | None = None,
     init_monitors: orm.DataDict | None = None,
 ) -> dict:
@@ -1178,19 +1179,19 @@ def _relax_launch_inputs(
         structure=structure,
         relax_type=relax_type,
     )
-    task_metadata_final = _merge_task_metadata(
+    runtime_config_final = _merge_runtime_config(
         {
             'init_relax_guarded': {'initial': _pw_scope_metadata(init['metadata_options'], options, protocol_code)},
             'main': _pw_scope_metadata(main['metadata_options'], options, protocol_code),
         },
-        task_metadata,
+        runtime_config,
     )
     _ensure_max_seconds(
-        main['parameters'], _placement_options(task_metadata_final, 'main', 'pw_calc'), where='main.pw_calc'
+        main['parameters'], _placement_options(runtime_config_final, 'main', 'pw_calc'), where='main.pw_calc'
     )
     _ensure_max_seconds(
         init['parameters'],
-        _placement_options(task_metadata_final, 'init_relax_guarded', 'initial', 'pw_calc'),
+        _placement_options(runtime_config_final, 'init_relax_guarded', 'initial', 'pw_calc'),
         where='init_relax_guarded.initial.pw_calc',
     )
     parameters, settings_node, distance_node = _as_nodes(
@@ -1238,7 +1239,7 @@ def _relax_launch_inputs(
         launch['monitors'] = eff_main
     if eff_init is not None:
         launch['init_monitors'] = eff_init
-    launch['task_metadata'] = task_metadata_final
+    launch['runtime_config'] = runtime_config_final
     return launch
 
 
@@ -1258,7 +1259,7 @@ def _bands_launch_inputs(
     scf_kpoints: orm.KpointsData | None,
     bands_kpoints: orm.KpointsData | None,
     options: dict | None,
-    task_metadata: dict | None,
+    runtime_config: dict | None,
     monitors: orm.DataDict | None = None,
     scf_monitors: orm.DataDict | None = None,
     bands_monitors: orm.DataDict | None = None,
@@ -1297,18 +1298,18 @@ def _bands_launch_inputs(
 
     scf_metadata = _pw_scope_metadata(scf['metadata_options'], options, scf_code)
     bands_metadata = _pw_scope_metadata(bands['metadata_options'], options, bands_code)
-    task_metadata_final = _merge_task_metadata(
+    runtime_config_final = _merge_runtime_config(
         {
             'scf': scf_metadata,
             'bands': bands_metadata,
         },
-        task_metadata,
+        runtime_config,
     )
     _ensure_max_seconds(
-        scf['parameters'], _placement_options(task_metadata_final, 'scf', 'pw_calc'), where='scf.pw_calc'
+        scf['parameters'], _placement_options(runtime_config_final, 'scf', 'pw_calc'), where='scf.pw_calc'
     )
     _ensure_max_seconds(
-        bands['parameters'], _placement_options(task_metadata_final, 'bands', 'pw_calc'), where='bands.pw_calc'
+        bands['parameters'], _placement_options(runtime_config_final, 'bands', 'pw_calc'), where='bands.pw_calc'
     )
     scf_parameters, scf_settings, scf_distance = _as_nodes(
         parameters=scf['parameters'], settings=scf['settings'], distance=scf['kpoints_distance']
@@ -1355,7 +1356,7 @@ def _bands_launch_inputs(
                 launch['scf_monitors'] = eff_scf
             if eff_bands is not None:
                 launch['bands_monitors'] = eff_bands
-    launch['task_metadata'] = task_metadata_final
+    launch['runtime_config'] = runtime_config_final
     return launch
 
 
@@ -1406,7 +1407,7 @@ def _pdos_launch_inputs(
     parent_output_parameters: orm.Dict | dict | None,
     serial: bool,
     options: dict | None,
-    task_metadata: dict | None,
+    runtime_config: dict | None,
     monitors: orm.DataDict | None = None,
     scf_monitors: orm.DataDict | None = None,
     nscf_monitors: orm.DataDict | None = None,
@@ -1520,45 +1521,44 @@ def _pdos_launch_inputs(
     hierarchical = {stage: stage_metadata}
     if not from_parent:
         hierarchical['scf'] = scf_options
-    task_metadata_final = _merge_task_metadata(hierarchical, task_metadata)
+    runtime_config_final = _merge_runtime_config(hierarchical, runtime_config)
     _ensure_max_seconds(
         nscf['parameters'],
-        _placement_options(task_metadata_final, stage, 'nscf', 'pw_calc'),
+        _placement_options(runtime_config_final, stage, 'nscf', 'pw_calc'),
         where=f'{stage}.nscf.pw_calc',
     )
     launch['nscf_parameters'] = orm.Dict(nscf['parameters'])
     if not from_parent:
         _ensure_max_seconds(
             sections['scf']['parameters'],
-            _placement_options(task_metadata_final, 'scf', 'pw_calc'),
+            _placement_options(runtime_config_final, 'scf', 'pw_calc'),
             where='scf.pw_calc',
         )
         launch['scf_parameters'] = orm.Dict(sections['scf']['parameters'])
-    launch['task_metadata'] = task_metadata_final
+    launch['runtime_config'] = runtime_config_final
     return launch
 
 
-def task_metadata_for_options(**placements: dict | None) -> dict[str, dict]:
-    """Form a ``task_metadata`` launch mapping from per-placement scheduler mappings.
+def runtime_config_for_placements(**placements: dict | None) -> dict[str, dict]:
+    """Form a ``runtime_config`` launch mapping from per-placement scheduler mappings.
 
-    Each keyword names one scope of the structured ``task_metadata`` mapping: an
+    Each keyword names one scope of the structured ``runtime_config`` mapping: an
     authored subgraph callee alias (for example ``scf``) whose value is the nested
     metadata subtree below that scope, or — when launching a base graph directly
     — the ``CalcJob`` placement alias itself (for example ``pw_calc``) whose
-    value is the plain metadata mapping (for example ``{'options': {...}}``).
-    Entries with ``None`` are omitted; empty mappings are retained because they
-    are valid metadata leaves and must not become missing configuration::
+    value is a process input mapping (for example ``{'metadata': {'options': {...}}}``).
+    Entries with ``None`` are omitted; explicit empty mappings are retained::
 
-        task_metadata_for_options(scf={'pw_calc': {'options': scf_options}},
-                                  bands={'pw_calc': {'options': bands_options}})
+        runtime_config_for_placements(scf={'pw_calc': {'metadata': {'options': scf_options}}},
+                                  bands={'pw_calc': {'metadata': {'options': bands_options}}})
 
     :param placements: per-scope metadata subtrees keyed by scope name.
-    :return: the ``task_metadata`` mapping to pass at launch.
+    :return: the ``runtime_config`` mapping to pass at launch.
     """
     return {name: dict(metadata) for name, metadata in placements.items() if metadata is not None}
 
 
-def pdos_protocol_task_metadata(protocol_inputs: dict) -> dict[str, dict]:
+def pdos_protocol_runtime_config(protocol_inputs: dict) -> dict[str, dict]:
     """Extract the ``dos``/``projwfc`` scheduler options of PDOS protocol inputs.
 
     The PDOS YAML carries ``dos.metadata.options`` and
@@ -1568,15 +1568,15 @@ def pdos_protocol_task_metadata(protocol_inputs: dict) -> dict[str, dict]:
     take theirs under their own ``'pw_calc'`` leaves at launch. Nest the
     fragment under the stage scope to form a launch mapping::
 
-        {stage: {'nscf': {'pw_calc': {'options': nscf_options}},
-                 **pdos_protocol_task_metadata(inputs)}}
+        {stage: {'nscf': {'pw_calc': {'metadata': {'options': nscf_options}}},
+                 **pdos_protocol_runtime_config(inputs)}}
 
     :param protocol_inputs: the merged mapping from :func:`get_protocol_inputs`.
     :return: the ``dos_calc``/``projwfc_calc`` leaf fragment of a PDOS stage scope.
     """
-    task_metadata: dict[str, dict] = {}
+    runtime_config: dict[str, dict] = {}
     for placement, section in (('dos_calc', 'dos'), ('projwfc_calc', 'projwfc')):
         options = (protocol_inputs.get(section, {}) or {}).get('metadata', {}).get('options')
         if options:
-            task_metadata[placement] = {'options': copy.deepcopy(options)}
-    return task_metadata
+            runtime_config[placement] = {'metadata': {'options': copy.deepcopy(options)}}
+    return runtime_config

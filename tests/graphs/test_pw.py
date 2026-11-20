@@ -124,7 +124,7 @@ def _stub_remote(path: str) -> RemoteData:
 
 
 @task
-def stub_pw_base(
+def pw_base_graph(
     code: Code,
     structure: StructureData,
     pseudos: DataDict,
@@ -180,15 +180,9 @@ def stub_pw_base(
 def _substitute_pw_base(monkeypatch) -> None:
     """Replace the native base placements with the ``@task`` stub.
 
-    The production graphs resolve placements by module-level alias name at
-    compilation, so patching each authored alias (``scf``/``bands``/``initial``/
-    ``main``) redirects the real orchestration without copying its body.
-    Compiled templates are cached on the graph handles, so they are reset
-    (restored afterwards by ``monkeypatch``) to force recompilation against
-    the substitute.
+    Inline aliases share one declaration; replace it and force recompilation.
     """
-    for alias in ('scf', 'bands', 'initial', 'main'):
-        monkeypatch.setattr(pw_module, alias, stub_pw_base)
+    monkeypatch.setattr(pw_module, 'pw_base_graph', pw_base_graph)
     for handle in (pw_module.pw_relax_graph, pw_module.pw_bands_graph, pw_module.init_relax_guarded):
         monkeypatch.setattr(handle, '_template', None)
 
@@ -648,7 +642,7 @@ def test_production_relax_converged(monkeypatch, aiida_code_installed) -> None:
     assert outputs['report'].get_dict()['attempts'] == 1
     assert outputs['report'].get_dict()['status'] == 'converged'
     assert outputs['output_structure'].cell == structure.cell
-    stub = next(child for child in node.called_descendants if child.process_label == 'stub_pw_base')
+    stub = next(child for child in node.called_descendants if child.process_label == 'pw_base_graph')
     for name in (
         'output_parameters',
         'output_trajectory',
@@ -660,7 +654,7 @@ def test_production_relax_converged(monkeypatch, aiida_code_installed) -> None:
         assert outputs[name].uuid == stub.outputs[name].uuid
     assert node.inputs.structure.uuid == structure.uuid
     assert node.base.links.get_outgoing(link_type=LinkType.CREATE).all() == []
-    assert sum(1 for child in node.called_descendants if child.process_label == 'stub_pw_base') == 1
+    assert sum(1 for child in node.called_descendants if child.process_label == 'pw_base_graph') == 1
     summary_node = next(child for child in node.called_descendants if child.process_label == 'summarize_relax')
     assert outputs['report'].uuid == summary_node.outputs.result.uuid
 
@@ -687,7 +681,7 @@ def test_production_relax_regrow_exhausted(monkeypatch, aiida_code_installed) ->
         'status': 'exhausted',
         'max_iterations': 2,
     }
-    assert sum(1 for child in node.called_descendants if child.process_label == 'stub_pw_base') == 2
+    assert sum(1 for child in node.called_descendants if child.process_label == 'pw_base_graph') == 2
 
 
 def test_production_relax_no_meta_convergence(monkeypatch, aiida_code_installed) -> None:
@@ -723,11 +717,11 @@ def test_production_relax_init_branch(monkeypatch, aiida_code_installed) -> None
     }
     _outputs, without = run_get_node(pw_relax_graph, structure=_silicon(), run_init_relax=False, **common)
     assert without.is_finished_ok
-    assert sum(1 for child in without.called_descendants if child.process_label == 'stub_pw_base') == 1
+    assert sum(1 for child in without.called_descendants if child.process_label == 'pw_base_graph') == 1
 
     _outputs, with_init = run_get_node(pw_relax_graph, structure=_silicon(), run_init_relax=True, **common)
     assert with_init.is_finished_ok
-    assert sum(1 for child in with_init.called_descendants if child.process_label == 'stub_pw_base') == 2
+    assert sum(1 for child in with_init.called_descendants if child.process_label == 'pw_base_graph') == 2
 
 
 def test_production_relax_zero_budget(monkeypatch, aiida_code_installed) -> None:
@@ -777,7 +771,7 @@ def test_production_bands_seekpath(monkeypatch, aiida_code_installed) -> None:
     assert isinstance(outputs['seekpath_parameters'], Dict)
     assert isinstance(outputs['band_structure'], BandsData)
     assert outputs['band_parameters'].get_dict()['number_of_bands'] == 12
-    assert sum(1 for child in node.called_descendants if child.process_label == 'stub_pw_base') == 2
+    assert sum(1 for child in node.called_descendants if child.process_label == 'pw_base_graph') == 2
 
 
 def test_production_bands_explicit_kpoints(monkeypatch, aiida_code_installed) -> None:

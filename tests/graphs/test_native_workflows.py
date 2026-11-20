@@ -28,7 +28,7 @@ production bodies recompile against the substitutes. No production graph is
 copied here.
 
 Scheduler options for the ``CalcJob`` placements travel at launch under
-``task_metadata`` as a strictly nested mapping (one level per authored
+``runtime_config`` as a strictly nested mapping (one level per authored
 subgraph callee alias, the ``CalcJob`` placement alias at each leaf), not
 through graph inputs: ``{'scf': {'pw_calc': ..., 'pw_calc_monitored': ...}, 'bands': {...}}``
 for bands, ``{'init_relax_guarded': {'initial': {...}}, 'main': {...}}`` for relax
@@ -323,9 +323,14 @@ def test_native_relax_converged_full_nesting(monkeypatch, aiida_code_installed) 
         max_iterations=5,
         meta_convergence=True,
         kpoints=_kpoints(),
-        task_metadata={
-            'init_relax_guarded': {'initial': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}}},
-            'main': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}},
+        runtime_config={
+            'init_relax_guarded': {
+                'initial': {
+                    'pw_calc': {'metadata': {'options': {}}},
+                    'pw_calc_monitored': {'metadata': {'options': {}}},
+                }
+            },
+            'main': {'pw_calc': {'metadata': {'options': {}}}, 'pw_calc_monitored': {'metadata': {'options': {}}}},
         },
     )
     assert node.is_finished_ok, node.exit_message
@@ -351,9 +356,9 @@ def test_native_bands_seekpath_full_nesting(monkeypatch, aiida_code_installed) -
         pseudos=pseudos,
         scf_kpoints_distance=Float(0.5),
         bands_kpoints_distance=Float(0.3),
-        task_metadata={
-            'scf': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}},
-            'bands': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}},
+        runtime_config={
+            'scf': {'pw_calc': {'metadata': {'options': {}}}, 'pw_calc_monitored': {'metadata': {'options': {}}}},
+            'bands': {'pw_calc': {'metadata': {'options': {}}}, 'pw_calc_monitored': {'metadata': {'options': {}}}},
         },
     )
     assert node.is_finished_ok, node.exit_message
@@ -394,12 +399,12 @@ def test_native_pdos_serial_full_nesting_and_order(monkeypatch, aiida_code_insta
         scf_kpoints_distance=Float(0.5),
         nscf_kpoints_distance=Float(0.5),
         clean_workdir=True,
-        task_metadata={
-            'scf': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}},
+        runtime_config={
+            'scf': {'pw_calc': {'metadata': {'options': {}}}, 'pw_calc_monitored': {'metadata': {'options': {}}}},
             'pdos_stage_serial': {
-                'nscf': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}},
-                'dos_calc': {'options': {}},
-                'projwfc_calc': {'options': {}},
+                'nscf': {'pw_calc': {'metadata': {'options': {}}}, 'pw_calc_monitored': {'metadata': {'options': {}}}},
+                'dos_calc': {'metadata': {'options': {}}},
+                'projwfc_calc': {'metadata': {'options': {}}},
             },
         },
     )
@@ -439,9 +444,14 @@ def test_native_relax_output_identity(monkeypatch, aiida_code_installed) -> None
         pseudos=_pseudos('Si'),
         max_iterations=5,
         kpoints=_kpoints(),
-        task_metadata={
-            'init_relax_guarded': {'initial': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}}},
-            'main': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}},
+        runtime_config={
+            'init_relax_guarded': {
+                'initial': {
+                    'pw_calc': {'metadata': {'options': {}}},
+                    'pw_calc_monitored': {'metadata': {'options': {}}},
+                }
+            },
+            'main': {'pw_calc': {'metadata': {'options': {}}}, 'pw_calc_monitored': {'metadata': {'options': {}}}},
         },
     )
     assert node.is_finished_ok, node.exit_message

@@ -170,7 +170,7 @@ class StubProjwfcOutputs(PortModel):
 
 
 @task
-def stub_pw_base(
+def pw_base_graph(
     code: Code,
     structure: StructureData,
     pseudos: DataDict,
@@ -200,7 +200,7 @@ def stub_pw_base(
 
 
 @task
-def stub_dos(
+def dos_calc(
     code: Code,
     parameters: Dict,
     parent_folder: RemoteData | None = None,
@@ -222,7 +222,7 @@ def stub_dos(
 
 
 @task
-def stub_projwfc(
+def projwfc_calc(
     code: Code,
     parameters: Dict,
     parent_folder: RemoteData | None = None,
@@ -252,10 +252,9 @@ def _substitute_all(monkeypatch) -> None:
     the graph handles, so they are reset (restored afterwards by
     ``monkeypatch``) to force recompilation against the substitutes.
     """
-    monkeypatch.setattr(pdos_module, 'scf', stub_pw_base)
-    monkeypatch.setattr(pdos_module, 'nscf', stub_pw_base)
-    monkeypatch.setattr(pdos_module, 'dos_calc', stub_dos)
-    monkeypatch.setattr(pdos_module, 'projwfc_calc', stub_projwfc)
+    monkeypatch.setattr(pdos_module, 'pw_base_graph', pw_base_graph)
+    monkeypatch.setattr(pdos_module, 'dos_calc', dos_calc)
+    monkeypatch.setattr(pdos_module, 'projwfc_calc', projwfc_calc)
     for handle in (
         pdos_module.pdos_stage_parallel,
         pdos_module.pdos_stage_serial,
@@ -317,7 +316,7 @@ def _calcjob_paths(template) -> set:
     return found
 
 
-def test_post_placements_keep_task_metadata_names() -> None:
+def test_post_placements_keep_runtime_config_names() -> None:
     """The calculation placements keep their names so one nested scope entry covers every graph."""
     from aiida.engine.processes.graphs.ir import ProcessTask, SubgraphTask
     from aiida.engine.processes.graphs.lowering import compile_graph
@@ -739,7 +738,7 @@ def test_production_from_scratch_parallel(monkeypatch, aiida_code_installed) -> 
     assert isinstance(outputs['projwfc_dos'], XyData)
     assert node.inputs.structure.uuid == structure.uuid
     assert node.base.links.get_outgoing(link_type=LinkType.CREATE).all() == []
-    assert sum(1 for child in node.called_descendants if child.process_label == 'stub_pw_base') == 2
+    assert sum(1 for child in node.called_descendants if child.process_label == 'pw_base_graph') == 2
     summary_node = next(child for child in node.called_descendants if child.process_label == 'summarize_pdos')
     assert outputs['report'].uuid == summary_node.outputs.result.uuid
 
@@ -754,7 +753,7 @@ def test_production_from_scratch_serial(monkeypatch, aiida_code_installed) -> No
     assert node.is_finished_ok
     assert outputs['report']['mode'] == 'serial'
     assert outputs['report']['status'] == 'completed'
-    assert sum(1 for child in node.called_descendants if child.process_label == 'stub_pw_base') == 2
+    assert sum(1 for child in node.called_descendants if child.process_label == 'pw_base_graph') == 2
     assert sum(1 for child in node.called_descendants if child.process_label == 'sweep_remote') >= 2
 
 
@@ -781,7 +780,7 @@ def test_production_from_parent_nbands_factor(monkeypatch, aiida_code_installed)
     assert outputs['nscf_output_parameters']['number_of_bands'] == 9
     assert outputs['report']['nbands'] == 9
     assert outputs['report']['stages'] == 1
-    assert sum(1 for child in node.called_descendants if child.process_label == 'stub_pw_base') == 1
+    assert sum(1 for child in node.called_descendants if child.process_label == 'pw_base_graph') == 1
 
 
 def test_production_from_parent_energy_range(monkeypatch, aiida_code_installed) -> None:

@@ -15,7 +15,7 @@ localhost, and decide their exit status from the carried parameters in an overri
 until a charge-density restart arrives. Failed runs store the same outputs a real
 failure would, so the production retry loop, rebinding, and ``require_*`` guards
 execute for real. Scheduler options for the ``CalcJob`` placements travel under
-``task_metadata`` as a nested mapping with one ``pw_calc``/``neb_calc`` scope:
+``runtime_config`` as a nested mapping with one ``pw_calc``/``neb_calc`` scope:
 the first attempt and every retry share the placement's configuration (loop
 control is transparent, so no suffixed or per-iteration key exists).
 ``pseudos`` travel as a general ``DataDict`` mapping
@@ -306,12 +306,12 @@ def _substitute(monkeypatch, stub, name, errors):
 
 def _pw_metadata() -> dict:
     """Return the launch metadata both ``pw`` placements need."""
-    return {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}}
+    return {'pw_calc': {'metadata': {'options': {}}}, 'pw_calc_monitored': {'metadata': {'options': {}}}}
 
 
 def _neb_metadata() -> dict:
     """Return the launch metadata the ``neb`` placement needs."""
-    return {'neb_calc': {'options': {}}}
+    return {'neb_calc': {'metadata': {'options': {}}}}
 
 
 def test_build_validates_all_base_graphs() -> None:
@@ -678,7 +678,7 @@ def test_pw_base_graph_diag_recovers_real_wiring(monkeypatch, aiida_code_install
         pseudos=_pseudos('Si', 'O'),
         parameters={'CONTROL': {}, 'SYSTEM': {}, 'ELECTRONS': {}},
         kpoints=_kpoints(),
-        task_metadata=_pw_metadata(),
+        runtime_config=_pw_metadata(),
     )
     assert node.is_finished_ok, node.exit_message
     assert outputs['report'].get_dict() == {'attempts': 3, 'status': 'finished'}
@@ -704,7 +704,7 @@ def test_pw_base_graph_success_real_wiring(monkeypatch, aiida_code_installed) ->
         pseudos=_pseudos('Si'),
         parameters={'CONTROL': {}, 'SYSTEM': {}, 'ELECTRONS': {'diagonalization': 'cg'}},
         kpoints=_kpoints(),
-        task_metadata=_pw_metadata(),
+        runtime_config=_pw_metadata(),
     )
     assert node.is_finished_ok, node.exit_message
     assert outputs['report'].get_dict() == {'attempts': 1, 'status': 'finished'}
@@ -726,7 +726,7 @@ def test_pw_base_graph_walltime_recovers_real_wiring(monkeypatch, aiida_code_ins
         pseudos=_pseudos('Si'),
         parameters={'CONTROL': {}, 'SYSTEM': {}, 'ELECTRONS': {}},
         kpoints=_kpoints(),
-        task_metadata=_pw_metadata(),
+        runtime_config=_pw_metadata(),
     )
     assert node.is_finished_ok, node.exit_message
     assert outputs['report'].get_dict() == {'attempts': 2, 'status': 'finished'}
@@ -751,7 +751,7 @@ def test_pw_base_graph_ionic_recovers_real_wiring(monkeypatch, aiida_code_instal
         pseudos=_pseudos('Si'),
         parameters={'CONTROL': {'calculation': 'relax'}, 'SYSTEM': {}, 'ELECTRONS': {}},
         kpoints=_kpoints(),
-        task_metadata=_pw_metadata(),
+        runtime_config=_pw_metadata(),
     )
     assert node.is_finished_ok, node.exit_message
     assert outputs['report'].get_dict() == {'attempts': 2, 'status': 'finished'}
@@ -772,7 +772,7 @@ def test_pw_base_graph_absent_structure_fails_loudly_real_wiring(monkeypatch, ai
         pseudos=_pseudos('Si'),
         parameters={'CONTROL': {}, 'SYSTEM': {}, 'ELECTRONS': {}},
         kpoints=_kpoints(),
-        task_metadata=_pw_metadata(),
+        runtime_config=_pw_metadata(),
     )
     assert not node.is_finished_ok
     assert outputs == {}
@@ -797,12 +797,14 @@ def test_pw_base_graph_exhausts_budget_real_wiring(monkeypatch, aiida_code_insta
         parameters={'CONTROL': {}, 'SYSTEM': {}, 'ELECTRONS': {}},
         kpoints=_kpoints(),
         max_iterations=2,
-        task_metadata=_pw_metadata(),
+        runtime_config=_pw_metadata(),
     )
-    assert not node.is_finished_ok
+    assert node.exit_status == 401
+    assert node.exit_message == 'The maximum number of iterations was exceeded.'
     assert outputs == {}
     children = node.called_descendants
     assert sum(1 for child in children if child.process_label == 'DiagPwCalc') == 2
+    assert not any(child.process_label == 'summarize_restart' for child in children)
 
 
 @pytest.mark.usefixtures('aiida_profile_clean')
@@ -819,7 +821,7 @@ def test_pw_base_graph_dict_parameters_and_parent_folder(monkeypatch, aiida_code
         parameters=orm.Dict({'CONTROL': {}, 'SYSTEM': {}, 'ELECTRONS': {'diagonalization': 'cg'}}),
         kpoints=_kpoints(),
         parent_folder=parent,
-        task_metadata=_pw_metadata(),
+        runtime_config=_pw_metadata(),
     )
     assert node.is_finished_ok, node.exit_message
     assert outputs['report'].get_dict() == {'attempts': 1, 'status': 'finished'}
@@ -864,7 +866,7 @@ def test_pw_base_graph_considered_501_returns_usable_outputs(monkeypatch, aiida_
         pseudos=_pseudos('Si'),
         parameters={'CONTROL': {}, 'SYSTEM': {}, 'ELECTRONS': {'diagonalization': 'cg'}},
         kpoints=_kpoints(),
-        task_metadata=_pw_metadata(),
+        runtime_config=_pw_metadata(),
     )
     assert node.is_finished_ok, node.exit_message
     assert outputs['report'].get_dict() == {
@@ -894,7 +896,7 @@ def test_pw_base_graph_warning_710_returns_usable_outputs(monkeypatch, aiida_cod
         pseudos=_pseudos('Si'),
         parameters={'CONTROL': {}, 'SYSTEM': {}, 'ELECTRONS': {'diagonalization': 'cg'}},
         kpoints=_kpoints(),
-        task_metadata=_pw_metadata(),
+        runtime_config=_pw_metadata(),
     )
     assert node.is_finished_ok, node.exit_message
     assert outputs['report'].get_dict() == {
@@ -920,7 +922,7 @@ def test_neb_base_graph_diag_recovers_real_wiring(monkeypatch, aiida_code_instal
         parameters=dict(NEB_PARAMETERS),
         pw_parameters=dict(NEB_PW_PARAMETERS),
         kpoints=_kpoints(),
-        task_metadata=_neb_metadata(),
+        runtime_config=_neb_metadata(),
     )
     assert node.is_finished_ok, node.exit_message
     assert outputs['report'].get_dict() == {'attempts': 3, 'status': 'finished'}

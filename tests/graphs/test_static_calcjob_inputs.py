@@ -15,7 +15,7 @@ Run from the parent core checkout with the QE dependencies installed::
 
 What this proves: the production ``pw_base_graph``/``neb_base_graph`` handles wire
 static pseudopotential ``DataDict`` containers directly, with no required dynamic
-namespaces. Monitor forwarding remains unchanged. Provenance links the single ``pseudos`` container;
+namespaces. Provenance links the single ``pseudos`` container;
 owned members are read through the stored container without detaching or
 re-expanding, keeping their identity and repository content.
 """
@@ -88,14 +88,6 @@ def _assert_no_required_dynamic(spec) -> None:
     visit(spec.inputs)
 
 
-def test_pseudos_need_no_namespace_forwarding() -> None:
-    """Pseudos need no forwarding, while the existing monitor namespace still does."""
-    assert task(PwCalculation)._task_spec.forwarded == ()
-    assert base.pw_calc._task_spec.forwarded == ('monitors',)
-    assert base.neb_calc._task_spec.forwarded == ()
-    assert base.ph_calc._task_spec.forwarded == ()
-
-
 def test_actual_specs_have_no_required_dynamic_namespaces() -> None:
     """Actual ``PwCalculation``/``NebCalculation`` specs expose static containers."""
     from aiida.engine.processes.ports import InputPort
@@ -139,7 +131,7 @@ class StaticSuccessPwCalc(PwCalculation):
 
 def _substitute(monkeypatch, stub, name, errors):
     """Replace a ``base`` placement with a plain static stub task."""
-    shaped = task(stub, inputs={'monitors': orm.DataDict}, errors=errors)
+    shaped = task(stub, errors=errors)
     monkeypatch.setattr(base, name, shaped)
     for handle in (base.pw_base_graph, base.neb_base_graph):
         monkeypatch.setattr(handle, '_template', None)
@@ -159,7 +151,7 @@ def test_static_pseudos_container_provenance(monkeypatch, aiida_code_installed) 
         pseudos=pseudos,
         parameters={'CONTROL': {}, 'SYSTEM': {}, 'ELECTRONS': {'diagonalization': 'cg'}},
         kpoints=_kpoints(),
-        task_metadata={'pw_calc': {'options': {}}},
+        runtime_config={'pw_calc': {'metadata': {'options': {}}}},
     )
     assert node.is_finished_ok, node.exit_message
     assert outputs['report'].get_dict() == {'attempts': 1, 'status': 'finished'}

@@ -96,7 +96,7 @@ owned ``UpfData`` members (one entry per structure kind). CalcJobs consume the
 container directly; no pseudopotential namespace declaration or expansion is needed
 in the graph. Provenance links the single ``pseudos`` container, whose members keep
 their identity and repository content. ``Code`` inputs are required; scheduler
-options travel in ``task_metadata`` keyed by placement name.
+options travel in ``runtime_config`` keyed by placement name.
 
 There is no container forwarding into the ``CalcJob`` ``monitors`` namespace: the
 monitored ``pw`` placement declares the one supported entry statically
@@ -144,7 +144,7 @@ import typing as t
 from collections.abc import Mapping
 
 from aiida import orm
-from aiida.engine import PortModel, graph, task
+from aiida.engine import Err, Ok, PortModel, RestartErrors, Result, graph, task
 from aiida.engine.processes.exit_code import ExitCode, ExitCodeEnum
 
 from aiida_quantumespresso.calculations.bands import BandsCalculation
@@ -755,15 +755,6 @@ def classify_pw_finished(error: PwErrors | None) -> PwFinished:
 
 
 @task
-def ensure_pw_recovered(error: PwErrors | None, restart: bool, finished: bool = False) -> None:
-    """Fail the graph when the ``pw`` loop exits without a recovered run."""
-    if finished:
-        return
-    if error is not None or restart:
-        raise ValueError('the pw restart loop never recovered.')
-
-
-@task
 def require_pw_restart_nodes(
     restart: bool,
     parent_mode: str,
@@ -1191,13 +1182,6 @@ def ph_run_recovered(parameters: dict) -> bool:
 
 
 @task
-def ensure_ph_recovered(error: PhErrors | None, restart: bool) -> None:
-    """Fail the graph when the ``ph`` loop exits without a recovered run."""
-    if error is not None or restart:
-        raise ValueError('the ph restart loop never recovered.')
-
-
-@task
 def require_ph_restart_nodes(
     restart: bool,
     parent_mode: str,
@@ -1377,13 +1361,6 @@ def finalize_neb_carry(
         'keep_parent': parent_mode == 'keep',
         'use_remote_parent': parent_mode == 'remote',
     }
-
-
-@task
-def ensure_neb_recovered(error: NebErrors | None, restart: bool) -> None:
-    """Fail the graph when the ``neb`` loop exits without a recovered run."""
-    if error is not None or restart:
-        raise ValueError('the neb restart loop never recovered.')
 
 
 @task
@@ -1631,8 +1608,6 @@ neb_calc = task(NebCalculation, errors=NebErrors)
 q2r_calc = task(Q2rCalculation)
 matdyn_calc = task(MatdynCalculation)
 bands_calc = task(BandsCalculation)
-gen_kpoints = make_kpoints_mesh
-rattle_task = rattle_positions
 
 
 @graph
@@ -1648,7 +1623,7 @@ def pw_base_graph(
     parent_folder: orm.RemoteData | None = None,
     monitors: orm.DataDict | None = None,
     max_iterations: int = 5,
-) -> dict:
+) -> Result[dict, RestartErrors]:
     """Run ``pw.x`` with automated restarts, returning the outputs plus a report.
 
     This is the reusable native restart loop for composite graphs: restarts that
@@ -1658,13 +1633,13 @@ def pw_base_graph(
     ``require_pw_restart_nodes`` fails loudly
     only when the failed run genuinely never stored the needed node.
     ``parameters`` accepts a plain ``dict`` or an ``orm.Dict``. Scheduler options
-    travel in ``task_metadata`` keyed by placement name at launch. ``monitors`` is an
+    travel in ``runtime_config`` keyed by placement name at launch. ``monitors`` is an
     optional ``DataDict`` carrying at most the single known ``stuck`` monitor entry;
     omit it (or pass an empty mapping) and the placements run unmonitored with no
     monitor inputs wired. Any other entry fails fast in ``resolve_stuck_monitor``.
     """
     if kpoints is None:
-        resolved_kpoints = gen_kpoints(
+        resolved_kpoints = make_kpoints_mesh.alias('gen_kpoints')(
             structure=structure, distance=kpoints_distance, force_parity=kpoints_force_parity
         )
     else:
@@ -1750,7 +1725,7 @@ def pw_base_graph(
     stdev = 0.01
     parent = parent_folder
     if plan_ionic.rattle_now and run.output_structure is not None:
-        rattled = rattle_task(structure=run.output_structure, stdev=stdev)
+        rattled = rattle_positions.alias('rattle_task')(structure=run.output_structure, stdev=stdev)
     else:
         rattled = structure
     guard = require_pw_restart_nodes(
@@ -1858,7 +1833,7 @@ def pw_base_graph(
             rattle_now=plan_ionic.rattle_now,
         )
         if plan_ionic.rattle_now and run.output_structure is not None:
-            rattled = rattle_task(structure=run.output_structure, stdev=stdev)
+            rattled = rattle_positions.alias('rattle_task')(structure=run.output_structure, stdev=stdev)
         else:
             rattled = structure
         guard = require_pw_restart_nodes(
@@ -1888,24 +1863,24 @@ def pw_base_graph(
         else:
             parent = None
         restart = plan_bands.restart
-    checked = ensure_pw_recovered(error=run.error, restart=restart, finished=finished.finished)
-    if finished.finished:
-        status = finished.status
-    elif run.error is None and not restart:
-        status = 'finished'
-    else:
-        status = 'exhausted'
-    report = summarize_restart(attempts=attempts, status=status, after=checked)
-    return {
-        'output_parameters': run.output_parameters,
-        'output_structure': run.output_structure,
-        'output_band': run.output_band,
-        'output_trajectory': run.output_trajectory,
-        'output_kpoints': run.output_kpoints,
-        'output_atomic_occupations': run.output_atomic_occupations,
-        'remote_folder': run.remote_folder,
-        'report': report,
-    }
+    if not finished.finished and restart:
+        return Err(RestartErrors.MAXIMUM_ITERATIONS_EXCEEDED)
+    if not finished.finished and run.error is not None:
+        return Err(RestartErrors.UNHANDLED_FAILURE)
+    status = finished.status if finished.finished else 'finished'
+    report = summarize_restart(attempts=attempts, status=status)
+    return Ok(
+        {
+            'output_parameters': run.output_parameters,
+            'output_structure': run.output_structure,
+            'output_band': run.output_band,
+            'output_trajectory': run.output_trajectory,
+            'output_kpoints': run.output_kpoints,
+            'output_atomic_occupations': run.output_atomic_occupations,
+            'remote_folder': run.remote_folder,
+            'report': report,
+        }
+    )
 
 
 @graph
@@ -1920,7 +1895,7 @@ def ph_base_graph(
     qpoints_force_parity: bool = False,
     only_initialization: bool = False,
     max_iterations: int = 5,
-) -> dict:
+) -> Result[dict, RestartErrors]:
     """Run ``ph.x`` with automated restarts, returning the merged outputs plus a report.
 
     Recover restarts rebind the preserved ``remote_folder`` and recover;
@@ -1941,7 +1916,7 @@ def ph_base_graph(
     for ``ONLY_INITIALIZATION`` and single runs. ``remote_folder`` is the last run's folder.
     """
     if qpoints is None:
-        resolved_qpoints = gen_kpoints(
+        resolved_qpoints = make_kpoints_mesh.alias('gen_kpoints')(
             structure=structure, distance=qpoints_distance, force_parity=qpoints_force_parity
         )
     else:
@@ -2101,7 +2076,10 @@ def ph_base_graph(
         else:
             parent = None
         restart = plan_convergence.restart
-    checked = ensure_ph_recovered(error=run.error, restart=restart)
+    if restart:
+        return Err(RestartErrors.MAXIMUM_ITERATIONS_EXCEEDED)
+    if run.error is not None:
+        return Err(RestartErrors.UNHANDLED_FAILURE)
     merge_checked = validate_ph_merge(
         expected=check.expected,
         found=check.found,
@@ -2109,22 +2087,19 @@ def ph_base_graph(
         missing=check.missing,
         has_expected=check.has_expected,
         only_initialization=only_initialization,
-        after=checked,
     )
-    if run.error is None and not restart:
-        status = 'finished'
-    else:
-        status = 'exhausted'
-    report = summarize_restart(attempts=attempts, status=status, after=merge_checked)
+    report = summarize_restart(attempts=attempts, status='finished', after=merge_checked)
     if merged is None:
         output_parameters = run.output_parameters
     else:
         output_parameters = merged
-    return {
-        'output_parameters': output_parameters,
-        'remote_folder': run.remote_folder,
-        'report': report,
-    }
+    return Ok(
+        {
+            'output_parameters': output_parameters,
+            'remote_folder': run.remote_folder,
+            'report': report,
+        }
+    )
 
 
 @graph
@@ -2140,18 +2115,18 @@ def neb_base_graph(
     kpoints_force_parity: bool = False,
     parent_folder: orm.RemoteData | None = None,
     max_iterations: int = 5,
-) -> dict:
+) -> Result[dict, RestartErrors]:
     """Run ``neb.x`` with automated restarts, returning the outputs plus a report.
 
     Remote restarts rebind the preserved ``remote_folder`` and recover;
     ``require_neb_restart_nodes`` fails loudly only when the failed run genuinely
     never stored one. ``parameters`` accepts a plain ``dict`` or an ``orm.Dict``.
-    Scheduler options travel in ``task_metadata`` keyed by placement name at
+    Scheduler options travel in ``runtime_config`` keyed by placement name at
     launch.
     """
     last_structure = final_neb_image_structure(images=images)
     if kpoints is None:
-        resolved_kpoints = gen_kpoints(
+        resolved_kpoints = make_kpoints_mesh.alias('gen_kpoints')(
             structure=last_structure, distance=kpoints_distance, force_parity=kpoints_force_parity
         )
     else:
@@ -2282,20 +2257,21 @@ def neb_base_graph(
         else:
             parent = None
         restart = plan_electronic.restart
-    checked = ensure_neb_recovered(error=run.error, restart=restart)
-    if run.error is None and not restart:
-        status = 'finished'
-    else:
-        status = 'exhausted'
-    report = summarize_restart(attempts=attempts, status=status, after=checked)
-    return {
-        'output_parameters': run.output_parameters,
-        'output_trajectory': run.output_trajectory,
-        'output_mep': run.output_mep,
-        'iteration_array': run.iteration_array,
-        'remote_folder': run.remote_folder,
-        'report': report,
-    }
+    if restart:
+        return Err(RestartErrors.MAXIMUM_ITERATIONS_EXCEEDED)
+    if run.error is not None:
+        return Err(RestartErrors.UNHANDLED_FAILURE)
+    report = summarize_restart(attempts=attempts, status='finished')
+    return Ok(
+        {
+            'output_parameters': run.output_parameters,
+            'output_trajectory': run.output_trajectory,
+            'output_mep': run.output_mep,
+            'iteration_array': run.iteration_array,
+            'remote_folder': run.remote_folder,
+            'report': report,
+        }
+    )
 
 
 @graph

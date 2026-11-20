@@ -10,7 +10,32 @@ Only QE was changed in this iteration. No core features or convenience APIs were
 added. Development checks use targeted subsets; full integration/compatibility CI
 is deferred until the rewrite is ready for its final verification push.
 
-## Core selection and CI mismatch
+## Port to the current graph language
+
+The rewrite targets core `7896ff4e0ee7a42f9e7f2004344ca4f27ef5bdd6`
+(`feature/graph-error-returns`), now the QE graph CI pin. The older revision
+below describes historical checks, not the launch API of this port.
+
+- Native graphs now use inline `.alias(...)` for stable stage placements and for
+  repeated calls in the same scope. Launch and protocol helpers use
+  `runtime_config`, e.g. `{'scf': {'pw_calc': {'metadata': {'options': options}}}}`.
+  Existing graph-wired executables are unchanged and cannot be overridden by
+  launch configuration.
+- Core can bind dynamic monitor mappings on a CalcJob placement at launch.
+  The port retains both PW placements and the graph-input monitor contract for
+  now. A regression case exercises a launch-configured monitor on `pw_calc`.
+  A single placement is a candidate if monitors become launch-only; this does
+  not enable forwarding a graph-produced container into a dynamic namespace.
+- PW, PH, and NEB return `Err(...)` directly if restart recovery fails, rather
+  than dispatching an `ensure_*_recovered` task. Retry-budget exhaustion reports
+  401 and an unhandled error reports 402. PW 501/710 still retain their usable
+  outputs and distinct report statuses. Composite stage-specific exit statuses
+  are still a follow-up.
+- `PreparedRun` and `ExecutionEnvironment` are available for protocol and launch
+  integration. The optional Slurm OOM retry policy does not replace QE restart
+  logic, prepare PH cutoffs, or provide termination cleanup.
+
+## Historical core selection and CI mismatch
 
 The local core used for the checks below is:
 
@@ -23,11 +48,9 @@ nested fixed-namespace specialization, and structured placement metadata. It has
 no container-to-dynamic-namespace forwarding or wildcard metadata rules. Repeated
 placements may use generated names such as `pw_calc_2`.
 
-`.github/workflows/graph.yml` still pins
-`955f04745d114bf4c51b219de869e1bab14b7e64`. CI on that historical revision does
-not validate the current implementation. Before final CI, publish the agreed core
-revision, update the pin to that published revision, and verify graph and legacy
-gates. Do not point CI at an unpublished local hash.
+The previous `.github/workflows/graph.yml` pin was
+`955f04745d114bf4c51b219de869e1bab14b7e64`. CI on that historical revision
+is not evidence for the current implementation.
 
 ## Implemented in the current QE iteration
 
@@ -55,14 +78,14 @@ is not general monitor parity. Core CalcJob monitoring is unchanged.
 Both static placements need configuration, even though only one branch runs:
 
 ```python
-task_metadata = {
+runtime_config = {
     'scf': {
-        'pw_calc': {'options': scf_options},
-        'pw_calc_monitored': {'options': scf_options},
+        'pw_calc': {'metadata': {'options': scf_options}},
+        'pw_calc_monitored': {'metadata': {'options': scf_options}},
     },
     'bands': {
-        'pw_calc': {'options': bands_options},
-        'pw_calc_monitored': {'options': bands_options},
+        'pw_calc': {'metadata': {'options': bands_options}},
+        'pw_calc_monitored': {'metadata': {'options': bands_options}},
     },
 }
 ```
@@ -123,9 +146,19 @@ container members. Container-aware tests compare pseudo content rather than
 requiring copy-on-insert members to retain caller UUIDs. Ownership invariants and
 static `pseudos: DataDict` ports remain unchanged.
 
-## Verification so far
+## Verification on the new core pin
 
-Independent targeted checks on the combined working tree:
+- Core graph suite: 1,090 passed locally. GitHub Actions pre-commit and docs
+  builds passed; the core test matrix is still running.
+- QE graph suite: 271 passed. A separate PW budget regression passed and
+  asserts exit status 401 without dispatching the success report task.
+- QE legacy workflow suite: 198 passed, 1 skipped against the experimental
+  core; 196 passed, 3 skipped against released core 2.9.4. The owned-container
+  regression only applies to experimental core.
+
+## Historical verification
+
+Independent targeted checks on the earlier combined working tree:
 
 - 11 selected input-resolution, malformed-report, scope-ordering, and graph-build
   checks passed (38.64 seconds).
@@ -162,8 +195,8 @@ executable, or remote-scheduler equivalence is claimed.
    meaningful policy, using external CalcJob substitutes rather than copied bodies.
 5. Resolve or explicitly accept root numeric exit-status differences, the single
    supported monitor restriction, and prepared-input/dry-run differences.
-6. Publish/select the core revision, update the CI pin, then push QE to run full
-   graph, legacy, and stable-core compatibility CI. Real QE executable and remote
-   scheduler checks are required before claiming deployment/scientific parity.
+6. Run QE graph, legacy, and stable-core compatibility CI using the new pin.
+   Real QE executable and remote scheduler checks are required before claiming
+   deployment/scientific parity.
 
 No missing QE implementation above is, by itself, a request for a new core API.

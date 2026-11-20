@@ -6,7 +6,7 @@
 # For further information on the license, see the LICENSE.txt file      #
 # For further information please visit http://www.aiida.net               #
 ############################################################################
-"""Iteration-2 integration: nested ``task_metadata``, retries, and monitor threading.
+"""Iteration-2 integration: nested ``runtime_config``, retries, and monitor threading.
 
 Run from the parent core checkout with the QE dependencies installed::
 
@@ -16,7 +16,7 @@ Run from the parent core checkout with the QE dependencies installed::
 What this proves (and nothing else does): the production composites forward an
 optional shared ``monitors`` mapping into every nested base run *and*
 independent per-stage scheduler options survive base-graph retries under the
-strictly nested ``task_metadata`` contract (one level per authored subgraph
+strictly nested ``runtime_config`` contract (one level per authored subgraph
 callee alias, the ``CalcJob`` metadata mapping at each leaf, control frames
 transparent). Every test runs a production root (``pw_bands_graph`` /
 ``pdos_from_scratch_serial`` / ``pw_relax_graph``) through the production
@@ -144,14 +144,14 @@ def test_bands_retry_keeps_independent_scope_options(monkeypatch, aiida_code_ins
         pseudos=_pseudos('Si'),
         scf_kpoints_distance=Float(0.5),
         bands_kpoints_distance=Float(0.3),
-        task_metadata={
+        runtime_config={
             'scf': {
-                'pw_calc': {'options': {'max_wallclock_seconds': 1111}},
-                'pw_calc_monitored': {'options': {'max_wallclock_seconds': 1111}},
+                'pw_calc': {'metadata': {'options': {'max_wallclock_seconds': 1111}}},
+                'pw_calc_monitored': {'metadata': {'options': {'max_wallclock_seconds': 1111}}},
             },
             'bands': {
-                'pw_calc': {'options': {'max_wallclock_seconds': 2222}},
-                'pw_calc_monitored': {'options': {'max_wallclock_seconds': 2222}},
+                'pw_calc': {'metadata': {'options': {'max_wallclock_seconds': 2222}}},
+                'pw_calc_monitored': {'metadata': {'options': {'max_wallclock_seconds': 2222}}},
             },
         },
     )
@@ -167,14 +167,14 @@ def test_bands_retry_keeps_independent_scope_options(monkeypatch, aiida_code_ins
     assert by_role == {'scf': {1111}, 'bands': {2222}}, by_role
 
 
-def test_bands_missing_scope_entry_fails_loudly(monkeypatch, aiida_code_installed) -> None:
-    """A missing nested scope entry fails loudly instead of running with defaults."""
+def test_bands_runtime_config_cannot_override_wired_code(monkeypatch, aiida_code_installed) -> None:
+    """Nested runtime configuration cannot replace the executable wired by the graph."""
     from aiida.common.exceptions import GraphValidationError
 
     _patch_nested(monkeypatch, pw_stub=RetryWalltimeBandsPwCalc)
     scf_code = aiida_code_installed(label='test.r3-bands-missing-scf', default_calc_job_plugin='quantumespresso.pw')
     bands_code = aiida_code_installed(label='test.r3-bands-missing-b', default_calc_job_plugin='quantumespresso.pw')
-    with pytest.raises(GraphValidationError, match='bands'):
+    with pytest.raises(GraphValidationError, match=r'bands\.pw_calc.*code.*already explicitly wired'):
         run_get_node(
             pw_bands_graph,
             structure=_silicon(),
@@ -185,11 +185,12 @@ def test_bands_missing_scope_entry_fails_loudly(monkeypatch, aiida_code_installe
             pseudos=_pseudos('Si'),
             scf_kpoints_distance=Float(0.5),
             bands_kpoints_distance=Float(0.3),
-            task_metadata={
+            runtime_config={
                 'scf': {
-                    'pw_calc': {'options': {'max_wallclock_seconds': 1111}},
-                    'pw_calc_monitored': {'options': {'max_wallclock_seconds': 1111}},
+                    'pw_calc': {'metadata': {'options': {'max_wallclock_seconds': 1111}}},
+                    'pw_calc_monitored': {'metadata': {'options': {'max_wallclock_seconds': 1111}}},
                 },
+                'bands': {'pw_calc': {'code': bands_code}},
             },
         )
 
@@ -212,9 +213,9 @@ def test_bands_misspelled_scope_rejected(monkeypatch, aiida_code_installed) -> N
             pseudos=_pseudos('Si'),
             scf_kpoints_distance=Float(0.5),
             bands_kpoints_distance=Float(0.3),
-            task_metadata={
-                'scf': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}},
-                'bandz': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}},
+            runtime_config={
+                'scf': {'pw_calc': {'metadata': {'options': {}}}, 'pw_calc_monitored': {'metadata': {'options': {}}}},
+                'bandz': {'pw_calc': {'metadata': {'options': {}}}, 'pw_calc_monitored': {'metadata': {'options': {}}}},
             },
         )
 
@@ -237,8 +238,8 @@ def test_bands_malformed_leaf_rejected(monkeypatch, aiida_code_installed) -> Non
             pseudos=_pseudos('Si'),
             scf_kpoints_distance=Float(0.5),
             bands_kpoints_distance=Float(0.3),
-            task_metadata={
-                'scf': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}},
+            runtime_config={
+                'scf': {'pw_calc': {'metadata': {'options': {}}}, 'pw_calc_monitored': {'metadata': {'options': {}}}},
                 'bands': {'pw_calc': ['not-a-mapping']},
             },
         )
@@ -261,9 +262,9 @@ def test_bands_monitors_reach_nested_calcs(monkeypatch, aiida_code_installed) ->
         scf_kpoints_distance=Float(0.5),
         bands_kpoints_distance=Float(0.3),
         monitors=monitors,
-        task_metadata={
-            'scf': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}},
-            'bands': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}},
+        runtime_config={
+            'scf': {'pw_calc': {'metadata': {'options': {}}}, 'pw_calc_monitored': {'metadata': {'options': {}}}},
+            'bands': {'pw_calc': {'metadata': {'options': {}}}, 'pw_calc_monitored': {'metadata': {'options': {}}}},
         },
     )
     assert node.is_finished_ok, node.exit_message
@@ -290,9 +291,9 @@ def test_bands_per_stage_monitors(monkeypatch, aiida_code_installed) -> None:
         bands_kpoints_distance=Float(0.3),
         monitors=_monitors(),
         bands_monitors=_monitors(min_repeats=3),
-        task_metadata={
-            'scf': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}},
-            'bands': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}},
+        runtime_config={
+            'scf': {'pw_calc': {'metadata': {'options': {}}}, 'pw_calc_monitored': {'metadata': {'options': {}}}},
+            'bands': {'pw_calc': {'metadata': {'options': {}}}, 'pw_calc_monitored': {'metadata': {'options': {}}}},
         },
     )
     assert node.is_finished_ok, node.exit_message
@@ -317,9 +318,14 @@ def test_relax_monitors_thread_through(monkeypatch, aiida_code_installed) -> Non
         max_iterations=2,
         kpoints=_kpoints(),
         monitors=_monitors(),
-        task_metadata={
-            'init_relax_guarded': {'initial': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}}},
-            'main': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}},
+        runtime_config={
+            'init_relax_guarded': {
+                'initial': {
+                    'pw_calc': {'metadata': {'options': {}}},
+                    'pw_calc_monitored': {'metadata': {'options': {}}},
+                }
+            },
+            'main': {'pw_calc': {'metadata': {'options': {}}}, 'pw_calc_monitored': {'metadata': {'options': {}}}},
         },
     )
     assert node.is_finished_ok, node.exit_message
@@ -363,18 +369,18 @@ def test_pdos_retry_keeps_nscf_scope_options(monkeypatch, aiida_code_installed) 
         scf_kpoints_distance=Float(0.5),
         nscf_kpoints_distance=Float(0.5),
         monitors=_monitors(),
-        task_metadata={
+        runtime_config={
             'scf': {
-                'pw_calc': {'options': {'max_wallclock_seconds': 1111}},
-                'pw_calc_monitored': {'options': {'max_wallclock_seconds': 1111}},
+                'pw_calc': {'metadata': {'options': {'max_wallclock_seconds': 1111}}},
+                'pw_calc_monitored': {'metadata': {'options': {'max_wallclock_seconds': 1111}}},
             },
             'pdos_stage_serial': {
                 'nscf': {
-                    'pw_calc': {'options': {'max_wallclock_seconds': 2222}},
-                    'pw_calc_monitored': {'options': {'max_wallclock_seconds': 2222}},
+                    'pw_calc': {'metadata': {'options': {'max_wallclock_seconds': 2222}}},
+                    'pw_calc_monitored': {'metadata': {'options': {'max_wallclock_seconds': 2222}}},
                 },
-                'dos_calc': {'options': {}},
-                'projwfc_calc': {'options': {}},
+                'dos_calc': {'metadata': {'options': {}}},
+                'projwfc_calc': {'metadata': {'options': {}}},
             },
         },
     )
@@ -418,12 +424,12 @@ def test_protocol_bands_nested_scopes_and_monitors(aiida_code_installed) -> None
             'bands': {'pw': {'parameters': {'SYSTEM': {'ecutwfc': 30.0, 'ecutrho': 240.0}}}},
         },
     )
-    task_metadata = launch['task_metadata']
-    assert set(task_metadata) == {'scf', 'bands'}
+    runtime_config = launch['runtime_config']
+    assert set(runtime_config) == {'scf', 'bands'}
     for scope in ('scf', 'bands'):
-        assert set(task_metadata[scope]) == {'pw_calc', 'pw_calc_monitored'}
-        assert task_metadata[scope]['pw_calc']['options']['max_wallclock_seconds'] == 43200
-        assert task_metadata[scope]['pw_calc_monitored'] == task_metadata[scope]['pw_calc']
+        assert set(runtime_config[scope]) == {'pw_calc', 'pw_calc_monitored'}
+        assert runtime_config[scope]['pw_calc']['metadata']['options']['max_wallclock_seconds'] == 43200
+        assert runtime_config[scope]['pw_calc_monitored'] == runtime_config[scope]['pw_calc']
     assert 'scf_monitors' in launch or 'monitors' in launch
     monitors_node = launch.get('scf_monitors', launch.get('monitors'))
     assert isinstance(monitors_node, DataDict)
@@ -548,23 +554,23 @@ def test_protocol_pdos_nested_scopes(aiida_code_installed) -> None:
             'nscf': {'pw': {'parameters': {'SYSTEM': {'ecutwfc': 30.0, 'ecutrho': 240.0}}}},
         },
     )
-    task_metadata = launch['task_metadata']
-    assert set(task_metadata) == {'scf', 'pdos_stage_serial'}
-    assert set(task_metadata['scf']) == {'pw_calc', 'pw_calc_monitored'}
-    assert set(task_metadata['pdos_stage_serial']) == {'nscf', 'dos_calc', 'projwfc_calc'}
-    assert set(task_metadata['pdos_stage_serial']['nscf']) == {'pw_calc', 'pw_calc_monitored'}
-    assert task_metadata['scf']['pw_calc_monitored'] == task_metadata['scf']['pw_calc']
+    runtime_config = launch['runtime_config']
+    assert set(runtime_config) == {'scf', 'pdos_stage_serial'}
+    assert set(runtime_config['scf']) == {'pw_calc', 'pw_calc_monitored'}
+    assert set(runtime_config['pdos_stage_serial']) == {'nscf', 'dos_calc', 'projwfc_calc'}
+    assert set(runtime_config['pdos_stage_serial']['nscf']) == {'pw_calc', 'pw_calc_monitored'}
+    assert runtime_config['scf']['pw_calc_monitored'] == runtime_config['scf']['pw_calc']
     assert (
-        task_metadata['pdos_stage_serial']['nscf']['pw_calc_monitored']
-        == task_metadata['pdos_stage_serial']['nscf']['pw_calc']
+        runtime_config['pdos_stage_serial']['nscf']['pw_calc_monitored']
+        == runtime_config['pdos_stage_serial']['nscf']['pw_calc']
     )
     for leaf in (
-        task_metadata['scf']['pw_calc'],
-        task_metadata['pdos_stage_serial']['nscf']['pw_calc'],
-        task_metadata['pdos_stage_serial']['dos_calc'],
-        task_metadata['pdos_stage_serial']['projwfc_calc'],
+        runtime_config['scf']['pw_calc'],
+        runtime_config['pdos_stage_serial']['nscf']['pw_calc'],
+        runtime_config['pdos_stage_serial']['dos_calc'],
+        runtime_config['pdos_stage_serial']['projwfc_calc'],
     ):
-        assert leaf['options']['max_wallclock_seconds'] == 43200
+        assert leaf['metadata']['options']['max_wallclock_seconds'] == 43200
 
 
 def test_graph_root_nodes_are_native(monkeypatch, aiida_code_installed) -> None:
@@ -584,9 +590,9 @@ def test_graph_root_nodes_are_native(monkeypatch, aiida_code_installed) -> None:
         pseudos=_pseudos('Si'),
         scf_kpoints_distance=Float(0.5),
         bands_kpoints_distance=Float(0.3),
-        task_metadata={
-            'scf': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}},
-            'bands': {'pw_calc': {'options': {}}, 'pw_calc_monitored': {'options': {}}},
+        runtime_config={
+            'scf': {'pw_calc': {'metadata': {'options': {}}}, 'pw_calc_monitored': {'metadata': {'options': {}}}},
+            'bands': {'pw_calc': {'metadata': {'options': {}}}, 'pw_calc_monitored': {'metadata': {'options': {}}}},
         },
     )
     assert node.is_finished_ok, node.exit_message
