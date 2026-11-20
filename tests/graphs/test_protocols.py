@@ -421,6 +421,66 @@ def test_launch_bands_inputs(aiida_code_installed) -> None:
         assert runtime_config[scope]['pw_calc_monitored'] == runtime_config[scope]['pw_calc']
 
 
+def test_prepare_run_records_protocol_and_opt_in_policy(aiida_code_installed) -> None:
+    """A PreparedRun keeps the selected policy and metadata separate from scientific inputs."""
+    from aiida.engine import IncreaseMemory, RetryPolicy, SchedulerFailure
+
+    code = aiida_code_installed(label='test.prepared-bands', default_calc_job_plugin='quantumespresso.pw')
+    policy = RetryPolicy(max_attempts=2, on={SchedulerFailure.OUT_OF_MEMORY: IncreaseMemory(factor=2, maximum_kb=8192)})
+    overrides = _cutoff_overrides(30.0, 240.0, 'scf', 'bands')
+    prepared = protocols.prepare_run_from_protocol(
+        'pw_bands',
+        structure=_silicon(),
+        scf_code=code,
+        bands_code=code,
+        pseudos={'Si': _upf()},
+        overrides=overrides,
+        options={'max_memory_kb': 4096},
+        execution_policy={'scf': {'pw_calc': policy}},
+    )
+    assert prepared.protocol == f'quantumespresso.pw_bands.{protocols.get_default_protocol("pw_bands")}'
+    assert prepared.version.startswith('sha256:')
+    assert prepared.overrides == overrides
+    assert 'runtime_config' not in prepared.inputs
+    assert prepared.execution_environment.execution_policy == {'scf': {'pw_calc': policy}}
+    assert (
+        prepared.execution_environment.runtime_config['scf']['pw_calc']['metadata']['options']['max_memory_kb'] == 4096
+    )
+
+
+def test_prepare_ph_inputs_sets_cutoff_without_mutation(aiida_code_installed) -> None:
+    """Use the fixed PH placement wallclock and preserve caller-owned parameters."""
+    code = aiida_code_installed(label='test.prepared-ph', default_calc_job_plugin='quantumespresso.ph')
+    parent = orm.RemoteData(computer=code.computer, remote_path='/tmp/ph-parent')
+    params = {'INPUTPH': {}}
+    launch = protocols.prepare_ph_inputs(
+        code=code,
+        parent_folder=parent,
+        parameters=params,
+        structure=_silicon(),
+        qpoints_distance=0.5,
+        options={'max_wallclock_seconds': 1000},
+    )
+    assert launch['parameters']['INPUTPH']['max_seconds'] == 950
+    assert params == {'INPUTPH': {}}
+
+
+def test_prepare_ph_inputs_resolves_parent_structure(aiida_code_installed) -> None:
+    """Use the parent's input structure when it has no relaxed output structure."""
+    from aiida.engine import calcfunction
+
+    code = aiida_code_installed(label='test.parent-ph', default_calc_job_plugin='quantumespresso.ph')
+
+    @calcfunction
+    def create_parent(structure: orm.StructureData) -> orm.RemoteData:
+        return orm.RemoteData(computer=code.computer, remote_path='/tmp/ph-creator')
+
+    structure = _silicon()
+    parent = create_parent(structure)
+    launch = protocols.prepare_ph_inputs(code=code, parent_folder=parent, parameters={}, qpoints_distance=0.5)
+    assert launch['structure'].uuid == structure.uuid
+
+
 def test_launch_bands_kpoints_conflict(aiida_code_installed) -> None:
     """Explicit bands k-points conflict with the protocol distance."""
     from aiida.orm import KpointsData

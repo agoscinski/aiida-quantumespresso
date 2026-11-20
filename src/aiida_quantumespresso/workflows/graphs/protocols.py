@@ -74,6 +74,7 @@ What is deliberately not resolved (fail fast, never silently dropped):
 
 import copy
 import enum
+import hashlib
 import math
 import pathlib
 import typing as t
@@ -82,6 +83,7 @@ import warnings
 import yaml
 from aiida import orm
 from aiida.common import exceptions
+from aiida.engine import ExecutionEnvironment, PreparedRun
 from aiida.plugins import GroupFactory
 
 from aiida_quantumespresso.common.types import ElectronicType, RelaxType, SpinType
@@ -92,6 +94,8 @@ __all__ = (
     'available_protocols',
     'get_default_protocol',
     'get_inputs_from_protocol',
+    'prepare_ph_inputs',
+    'prepare_run_from_protocol',
     'get_protocol_filepath',
     'get_protocol_inputs',
     'pdos_protocol_runtime_config',
@@ -750,7 +754,9 @@ def _placement_options(runtime_config: dict | None, *path: str) -> dict:
     return dict(options) if isinstance(options, dict) else {}
 
 
-def _ensure_max_seconds(parameters: dict, options: dict | None, *, where: str = 'placement') -> dict:
+def _ensure_max_seconds(
+    parameters: dict, options: dict | None, *, where: str = 'placement', namelist: str = 'CONTROL'
+) -> dict:
     """Derive ``CONTROL.max_seconds`` from a fixed scheduler wallclock, preserving an explicit value.
 
     Mirrors ``PwBaseWorkChain.prepare_process`` without per-attempt scheduler metadata: when
@@ -763,7 +769,7 @@ def _ensure_max_seconds(parameters: dict, options: dict | None, *, where: str = 
     so an invalid limit would fail loudly at launch while a silently skipped cutoff would
     leave the run without the QE stop that the wallclock promised.
     """
-    control = parameters.setdefault('CONTROL', {})
+    control = parameters.setdefault(namelist, {})
     if 'max_seconds' in control:
         return parameters
     if not options:
@@ -1059,6 +1065,90 @@ def get_inputs_from_protocol(
         scf_monitors=_coerce_monitors_input(scf_monitors, 'scf_monitors'),
         nscf_monitors=_coerce_monitors_input(nscf_monitors, 'nscf_monitors'),
     )
+
+
+def prepare_run_from_protocol(
+    kind: str,
+    *,
+    protocol: str | None = None,
+    overrides: dict | pathlib.Path | None = None,
+    execution_policy: dict | None = None,
+    **inputs: t.Any,
+) -> PreparedRun:
+    """Resolve a native QE protocol and attach its execution policy and provenance.
+
+    :param kind: Graph protocol family, e.g. ``'pw_bands'``.
+    :param protocol: Protocol name, defaulting to the YAML default.
+    :param overrides: Explicit scientific protocol overrides, or a YAML path.
+    :param execution_policy: Opt-in policies keyed by the same placements as runtime configuration.
+    :param inputs: Arguments accepted by :func:`get_inputs_from_protocol`.
+    :return: A payload for launching the matching native graph with ``prepared_run=``.
+    """
+    name = get_default_protocol(kind) if protocol is None else protocol
+    raw_overrides = _as_overrides(overrides)
+    launch = get_inputs_from_protocol(kind, protocol=name, overrides=raw_overrides, **inputs)
+    resolved_defaults = get_protocol_inputs(kind, name)
+    digest = hashlib.sha256(yaml.safe_dump(resolved_defaults, sort_keys=True).encode()).hexdigest()
+    runtime_config = launch.pop('runtime_config')
+    return PreparedRun(
+        inputs=launch,
+        execution_environment=ExecutionEnvironment(
+            runtime_config=runtime_config, execution_policy=execution_policy or {}
+        ),
+        protocol=f'quantumespresso.{kind}.{name}',
+        version=f'sha256:{digest}',
+        overrides=raw_overrides,
+    )
+
+
+def prepare_ph_inputs(
+    *,
+    code: orm.Code,
+    parent_folder: orm.RemoteData,
+    parameters: orm.Dict | dict,
+    options: dict | None = None,
+    structure: orm.StructureData | None = None,
+    qpoints: orm.KpointsData | None = None,
+    qpoints_distance: float | None = None,
+    **inputs: t.Any,
+) -> dict:
+    """Prepare fixed scheduler and q-point inputs for ``ph_base_graph``.
+
+    :param code: Executable for the PH calculation.
+    :param parent_folder: Parent calculation folder.
+    :param parameters: Calculation parameters; explicit ``INPUTPH.max_seconds`` is retained.
+    :param options: Scheduler options for the PH placement.
+    :param structure: Explicit structure for generating the mesh; otherwise use the parent structure.
+    :param qpoints: Explicit q-points, mutually exclusive with ``qpoints_distance``.
+    :param qpoints_distance: Target mesh spacing.
+    :param inputs: Additional PH graph inputs.
+    :return: A mapping ready to launch ``ph_base_graph``.
+    """
+    if (qpoints is None) == (qpoints_distance is None):
+        msg = 'Specify exactly one of `qpoints` and `qpoints_distance`.'
+        raise ValueError(msg)
+    if qpoints_distance is not None and structure is None:
+        creator = parent_folder.creator
+        if creator is not None:
+            structure = getattr(creator.outputs, 'output_structure', None)
+            if structure is None:
+                structure = getattr(creator.inputs, 'structure', None)
+        if not isinstance(structure, orm.StructureData):
+            msg = 'Cannot resolve the PH mesh structure from the parent folder; pass `structure` explicitly.'
+            raise ValueError(msg)
+    metadata = _placement_metadata({}, options, code)
+    prepared_parameters = parameters.get_dict() if isinstance(parameters, orm.Dict) else copy.deepcopy(parameters)
+    _ensure_max_seconds(prepared_parameters, metadata['metadata']['options'], where='ph_calc', namelist='INPUTPH')
+    return {
+        **inputs,
+        'code': code,
+        'parent_folder': parent_folder,
+        'parameters': prepared_parameters,
+        'structure': structure,
+        'qpoints': qpoints,
+        'qpoints_distance': qpoints_distance,
+        'runtime_config': {'ph_calc': metadata},
+    }
 
 
 def _section_param_overrides(raw_overrides: dict, *path: str) -> dict:

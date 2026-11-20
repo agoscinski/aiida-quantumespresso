@@ -1646,27 +1646,20 @@ def pw_base_graph(
         resolved_kpoints = kpoints
     tried = seed_diagonalizations(parameters=parameters)
     stuck = resolve_stuck_monitor(monitors=monitors)
+    # `partial` is a graph intrinsic, not a Python call.
+    plain = partial(pw_calc, code=code, pseudos=pseudos, settings=settings, kpoints=resolved_kpoints)  # noqa: F821
+    monitored = partial(  # noqa: F821
+        pw_calc_monitored, code=code, pseudos=pseudos, settings=settings, kpoints=resolved_kpoints
+    )
     if stuck.present:
-        run = pw_calc_monitored(
-            code=code,
+        run = monitored(
             structure=structure,
-            pseudos=pseudos,
             parameters=parameters,
-            settings=settings,
-            kpoints=resolved_kpoints,
             parent_folder=parent_folder,
             monitors={'stuck': stuck.monitor},
         )
     else:
-        run = pw_calc(
-            code=code,
-            structure=structure,
-            pseudos=pseudos,
-            parameters=parameters,
-            settings=settings,
-            kpoints=resolved_kpoints,
-            parent_folder=parent_folder,
-        )
+        run = plain(structure=structure, parameters=parameters, parent_folder=parent_folder)
     finished = classify_pw_finished(error=run.error)
     plan_walltime = handle_pw_walltime(error=run.error, parameters=parameters, tried=tried)
     plan_diagonalization = handle_pw_diagonalization(
@@ -1759,26 +1752,14 @@ def pw_base_graph(
     while ((run.error is not None and not finished.finished) or restart) and attempts < max_iterations:
         attempts = attempts + 1
         if stuck.present:
-            run = pw_calc_monitored(
-                code=code,
+            run = monitored(
                 structure=structure,
-                pseudos=pseudos,
                 parameters=final.parameters,
-                settings=settings,
-                kpoints=resolved_kpoints,
                 parent_folder=parent,
                 monitors={'stuck': stuck.monitor},
             )
         else:
-            run = pw_calc(
-                code=code,
-                structure=structure,
-                pseudos=pseudos,
-                parameters=final.parameters,
-                settings=settings,
-                kpoints=resolved_kpoints,
-                parent_folder=parent,
-            )
+            run = plain(structure=structure, parameters=final.parameters, parent_folder=parent)
         finished = classify_pw_finished(error=run.error)
         plan_walltime = handle_pw_walltime(error=run.error, parameters=final.parameters, tried=final.tried)
         plan_diagonalization = handle_pw_diagonalization(

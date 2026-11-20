@@ -736,6 +736,10 @@ def test_production_from_scratch_parallel(monkeypatch, aiida_code_installed) -> 
     assert outputs['dos_output_parameters']['emax'] == 8.0
     assert isinstance(outputs['dos_output_dos'], XyData)
     assert isinstance(outputs['projwfc_dos'], XyData)
+    assert outputs['scf']['output_parameters'].uuid == outputs['scf_output_parameters'].uuid
+    assert outputs['nscf']['output_band'].uuid == outputs['nscf_output_band'].uuid
+    assert outputs['dos']['output_dos'].uuid == outputs['dos_output_dos'].uuid
+    assert outputs['projwfc']['Dos'].uuid == outputs['projwfc_dos'].uuid
     assert node.inputs.structure.uuid == structure.uuid
     assert node.base.links.get_outgoing(link_type=LinkType.CREATE).all() == []
     assert sum(1 for child in node.called_descendants if child.process_label == 'pw_base_graph') == 2

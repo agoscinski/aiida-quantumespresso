@@ -153,6 +153,9 @@ class PdosWindow(t.TypedDict):
 class PdosStageOutputs(t.TypedDict):
     """Outputs of the NSCF-to-report stage: the NSCF products, the DOS products, and the summary report."""
 
+    nscf: dict
+    dos: dict
+    projwfc: dict
     nscf_remote_folder: RemoteData
     nscf_output_parameters: Dict
     nscf_output_band: BandsData
@@ -174,6 +177,7 @@ class PdosStageOutputs(t.TypedDict):
 class PdosFromScratchOutputs(PdosStageOutputs):
     """Outputs of the from-scratch roots: the stage outputs plus the SCF products."""
 
+    scf: dict
     scf_remote_folder: RemoteData
     scf_output_parameters: Dict
     scf_output_band: BandsData | None
@@ -556,6 +560,9 @@ def pdos_stage_parallel(
         mode='parallel',
     )
     return {
+        'nscf': nscf_run,
+        'dos': dos_run,
+        'projwfc': projwfc_run,
         'nscf_remote_folder': nscf_run.remote_folder,
         'nscf_output_parameters': nscf_run.output_parameters,
         'nscf_output_band': nscf_run.output_band,
@@ -689,6 +696,9 @@ def pdos_stage_serial(
         mode='serial',
     )
     return {
+        'nscf': nscf_run,
+        'dos': dos_run,
+        'projwfc': projwfc_run,
         'nscf_remote_folder': nscf_run.remote_folder,
         'nscf_output_parameters': nscf_run.output_parameters,
         'nscf_output_band': nscf_run.output_band,
@@ -807,9 +817,13 @@ def pdos_from_scratch_parallel(
     )
     scf_final = sweep_remote.alias('scf_final')(folder=scf_run.remote_folder, enabled=clean_workdir, after=stage)  # noqa: F841
     return {
+        'scf': scf_run,
         'scf_remote_folder': scf_run.remote_folder,
         'scf_output_parameters': scf_run.output_parameters,
         'scf_output_band': scf_run.output_band,
+        'nscf': stage.nscf,
+        'dos': stage.dos,
+        'projwfc': stage.projwfc,
         'nscf_remote_folder': stage.nscf_remote_folder,
         'nscf_output_parameters': stage.nscf_output_parameters,
         'nscf_output_band': stage.nscf_output_band,
@@ -925,9 +939,13 @@ def pdos_from_scratch_serial(
     scf_swept = sweep_remote(folder=scf_run.remote_folder, enabled=True, after=stage)
     scf_final = sweep_remote.alias('scf_final')(folder=scf_run.remote_folder, enabled=clean_workdir, after=scf_swept)  # noqa: F841
     return {
+        'scf': scf_run,
         'scf_remote_folder': scf_run.remote_folder,
         'scf_output_parameters': scf_run.output_parameters,
         'scf_output_band': scf_run.output_band,
+        'nscf': stage.nscf,
+        'dos': stage.dos,
+        'projwfc': stage.projwfc,
         'nscf_remote_folder': stage.nscf_remote_folder,
         'nscf_output_parameters': stage.nscf_output_parameters,
         'nscf_output_band': stage.nscf_output_band,
@@ -1024,6 +1042,9 @@ def pdos_from_parent_parallel(
         monitors=monitors,
     )
     return {
+        'nscf': stage.nscf,
+        'dos': stage.dos,
+        'projwfc': stage.projwfc,
         'nscf_remote_folder': stage.nscf_remote_folder,
         'nscf_output_parameters': stage.nscf_output_parameters,
         'nscf_output_band': stage.nscf_output_band,
@@ -1114,6 +1135,9 @@ def pdos_from_parent_serial(
         monitors=monitors,
     )
     return {
+        'nscf': stage.nscf,
+        'dos': stage.dos,
+        'projwfc': stage.projwfc,
         'nscf_remote_folder': stage.nscf_remote_folder,
         'nscf_output_parameters': stage.nscf_output_parameters,
         'nscf_output_band': stage.nscf_output_band,

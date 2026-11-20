@@ -12,9 +12,9 @@ is deferred until the rewrite is ready for its final verification push.
 
 ## Port to the current graph language
 
-The rewrite targets core `7896ff4e0ee7a42f9e7f2004344ca4f27ef5bdd6`
-(`feature/graph-error-returns`), now the QE graph CI pin. The older revision
-below describes historical checks, not the launch API of this port.
+The rewrite targets core `49f9c34e0950fbc3affe90c6eaf15b49078fb07e`
+(`feature/qe-graph-rewrite`), now the QE graph CI pin. This branch combines
+`Result` returns and placement recovery with `partial` and inline collections.
 
 - Native graphs now use inline `.alias(...)` for stable stage placements and for
   repeated calls in the same scope. Launch and protocol helpers use
@@ -31,9 +31,19 @@ below describes historical checks, not the launch API of this port.
   401 and an unhandled error reports 402. PW 501/710 still retain their usable
   outputs and distinct report statuses. Composite stage-specific exit statuses
   are still a follow-up.
-- `PreparedRun` and `ExecutionEnvironment` are available for protocol and launch
-  integration. The optional Slurm OOM retry policy does not replace QE restart
-  logic, prepare PH cutoffs, or provide termination cleanup.
+- PW binds its shared CalcJob inputs once with `partial`; initial and retry
+  calls supply only changing inputs. Monitor placement is still split to keep
+  supporting graph-wired monitors. No scientific tasks were replaced with
+  inline collection expressions.
+- PDOS adds static `scf`, `nscf`, `dos`, and `projwfc` output namespaces where
+  applicable, preserving the existing flat outputs and their node identities.
+  Exact legacy parity still depends on the outputs each native base exposes.
+- `prepare_run_from_protocol` returns `PreparedRun` with a protocol fingerprint
+  and optional execution policy. Slurm OOM retry is opt-in through that policy;
+  it does not replace QE restart logic.
+- `prepare_ph_inputs` derives `INPUTPH.max_seconds` from fixed scheduler options
+  and can select the parent calculation's structure for q-point preparation.
+  Direct graph launches still take explicit scientific inputs.
 
 ## Historical core selection and CI mismatch
 
@@ -146,10 +156,14 @@ container members. Container-aware tests compare pseudo content rather than
 requiring copy-on-insert members to retain caller UUIDs. Ownership invariants and
 static `pseudos: DataDict` ports remain unchanged.
 
-## Verification on the new core pin
+## Verification
 
-- Core graph suite: 1,090 passed locally. GitHub Actions pre-commit and docs
-  builds passed; the core test matrix is still running.
+The combined core revision passed all 1,287 local graph tests. The new QE
+preparation helpers and a PDOS namespace/output-identity regression passed
+focused checks. The full QE graph run below predates the combined revision:
+
+- Core graph suite on the previous pin: 1,090 passed locally. GitHub Actions
+  pre-commit and docs builds passed.
 - QE graph suite: 271 passed. A separate PW budget regression passed and
   asserts exit status 401 without dispatching the success report task.
 - QE legacy workflow suite: 198 passed, 1 skipped against the experimental
