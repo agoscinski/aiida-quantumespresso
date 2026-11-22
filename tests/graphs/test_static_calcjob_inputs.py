@@ -130,8 +130,9 @@ class StaticSuccessPwCalc(PwCalculation):
 
 
 def _substitute(monkeypatch, stub, name, errors):
-    """Replace a ``base`` placement with a plain static stub task."""
-    shaped = task(stub, errors=errors)
+    """Replace a base placement while retaining its static monitor port, if any."""
+    inputs = {'monitors': {'stuck': orm.Dict}} if name == 'pw_calc' else None
+    shaped = task(stub, inputs=inputs, errors=errors)
     monkeypatch.setattr(base, name, shaped)
     for handle in (base.pw_base_graph, base.neb_base_graph):
         monkeypatch.setattr(handle, '_template', None)
