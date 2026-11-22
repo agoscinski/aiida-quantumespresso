@@ -11,7 +11,7 @@ permissions:
 
 env:
     # Released core 2.8 has no graph API. Keep this integration revision exact.
-    CORE_REV: 49f9c34e0950fbc3affe90c6eaf15b49078fb07e
+    CORE_REV: db31187a536da235c2359286717658b378f30ff3
     CORE_REPO: agoscinski/aiida-core
     AIIDA_WARN_v3: 1
 
@@ -43,7 +43,7 @@ jobs:
                 import json
                 import os
                 from importlib.metadata import distribution, version
-                from aiida.engine import graph, par_map, task
+                from aiida.engine import GraphLaunchPreview, dataflow, graph, par_map, task
 
                 assert version('aiida-core').startswith('3.')
                 direct = json.loads(distribution('aiida-core').read_text('direct_url.json'))

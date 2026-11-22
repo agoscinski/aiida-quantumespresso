@@ -207,7 +207,10 @@ def dos_calc(
     settings: Dict | None = None,
 ) -> StubDosOutputs:
     """Stand-in for the ``dos.x`` calculation: echo the resolved energy window."""
-    del code, parent_folder, settings
+    del code, parent_folder
+    if settings is not None and settings.get_dict().get('fail'):
+        msg = 'DOS failed'
+        raise ValueError(msg)
     params = parameters.get_dict()
     block = params.get('DOS', {})
     emin, emax = float(block.get('emin', -5.0)), float(block.get('emax', 8.0))
@@ -395,14 +398,21 @@ def test_roots_nest_stage_beside_scf_scope() -> None:
         assert _calcjob_paths(compile_graph(root)) == {(stage, *path) for path in expected_stage}
 
 
-def test_serial_stage_orders_dos_before_projwfc() -> None:
-    """The serial stage wires an unconditional ``after`` edge from the DOS sweep into PROJWFC."""
+def test_pdos_stage_post_processing_dependencies() -> None:
+    """The parallel stage forks and joins; the serial stage sweeps DOS before PROJWFC."""
     from aiida.engine.processes.graphs.lowering import compile_graph
 
-    parallel_edges = {(edge.source, edge.target) for edge in compile_graph(pdos_stage_parallel).dependencies}
-    assert ('sweep_remote', 'projwfc_calc') not in parallel_edges
-    serial_edges = {(edge.source, edge.target) for edge in compile_graph(pdos_stage_serial).dependencies}
-    assert ('sweep_remote', 'projwfc_calc') in serial_edges
+    parallel = {(edge.source, edge.target) for edge in compile_graph(pdos_stage_parallel).dependencies}
+    assert ('dos_calc', 'projwfc_calc') not in parallel
+    assert ('projwfc_calc', 'dos_calc') not in parallel
+    for placement in ('dos_calc', 'projwfc_calc'):
+        assert ('resolve_post_windows', placement) in parallel
+        assert (placement, 'sweep_stage') in parallel
+    assert ('sweep_stage', 'summarize_pdos') in parallel
+
+    serial = {(edge.source, edge.target) for edge in compile_graph(pdos_stage_serial).dependencies}
+    assert ('dos_calc', 'sweep_remote') in serial
+    assert ('sweep_remote', 'projwfc_calc') in serial
 
 
 @pytest.mark.parametrize('stage', ['scf', 'nscf'])
@@ -428,8 +438,8 @@ def test_stage_guards_nscf_before_window() -> None:
     from aiida.engine.processes.graphs.lowering import compile_graph
 
     for target in (pdos_stage_parallel, pdos_stage_serial):
-        edges = {(edge.source, edge.target) for edge in compile_graph(target).dependencies}
-        assert ('require_pdos_base', 'extract_nscf_window') in edges
+        names = compile_graph(target).task_names
+        assert names.index('require_pdos_base') < names.index('extract_nscf_window')
 
 
 def test_roots_guard_scf_before_stage() -> None:
@@ -440,8 +450,8 @@ def test_roots_guard_scf_before_stage() -> None:
         (pdos_from_scratch_parallel, 'pdos_stage_parallel'),
         (pdos_from_scratch_serial, 'pdos_stage_serial'),
     ):
-        edges = {(edge.source, edge.target) for edge in compile_graph(root).dependencies}
-        assert ('require_pdos_base', stage) in edges
+        names = compile_graph(root).task_names
+        assert names.index('require_pdos_base') < names.index(stage)
 
 
 def test_require_scf_parameters() -> None:
@@ -736,6 +746,8 @@ def test_production_from_scratch_parallel(monkeypatch, aiida_code_installed) -> 
     assert outputs['dos_output_parameters']['emax'] == 8.0
     assert isinstance(outputs['dos_output_dos'], XyData)
     assert isinstance(outputs['projwfc_dos'], XyData)
+    assert 'report' not in outputs['scf']
+    assert 'report' not in outputs['nscf']
     assert outputs['scf']['output_parameters'].uuid == outputs['scf_output_parameters'].uuid
     assert outputs['nscf']['output_band'].uuid == outputs['nscf_output_band'].uuid
     assert outputs['dos']['output_dos'].uuid == outputs['dos_output_dos'].uuid
@@ -745,6 +757,22 @@ def test_production_from_scratch_parallel(monkeypatch, aiida_code_installed) -> 
     assert sum(1 for child in node.called_descendants if child.process_label == 'pw_base_graph') == 2
     summary_node = next(child for child in node.called_descendants if child.process_label == 'summarize_pdos')
     assert outputs['report'].uuid == summary_node.outputs.result.uuid
+
+
+def test_parallel_dos_failure_waits_for_projwfc_and_skips_continuation(monkeypatch, aiida_code_installed) -> None:
+    """A failed DOS must not let cleanup or reporting run, or leave PROJWFC active."""
+    _substitute_all(monkeypatch)
+    inputs = _scratch_inputs(*_codes(aiida_code_installed, 'fail-dos'))
+    inputs['dos_settings'] = Dict({'fail': True})
+
+    outputs, node = run_get_node(pdos_from_scratch_parallel, **inputs)
+
+    assert node.exit_status == 400
+    assert 'report' not in outputs
+    children = {child.process_label: child for child in node.called_descendants}
+    assert children['dos_calc'].is_excepted
+    assert children['projwfc_calc'].is_finished_ok
+    assert {'sweep_stage', 'summarize_pdos'}.isdisjoint(children)
 
 
 def test_production_from_scratch_serial(monkeypatch, aiida_code_installed) -> None:

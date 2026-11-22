@@ -1639,14 +1639,13 @@ def pw_base_graph(
     monitor inputs wired. Any other entry fails fast in ``resolve_stuck_monitor``.
     """
     if kpoints is None:
-        resolved_kpoints = make_kpoints_mesh.alias('gen_kpoints')(
+        resolved_kpoints = make_kpoints_mesh(
             structure=structure, distance=kpoints_distance, force_parity=kpoints_force_parity
-        )
+        ).alias('gen_kpoints')
     else:
         resolved_kpoints = kpoints
     tried = seed_diagonalizations(parameters=parameters)
     stuck = resolve_stuck_monitor(monitors=monitors)
-    # `partial` is a graph intrinsic, not a Python call.
     plain = partial(pw_calc, code=code, pseudos=pseudos, settings=settings, kpoints=resolved_kpoints)  # noqa: F821
     monitored = partial(  # noqa: F821
         pw_calc_monitored, code=code, pseudos=pseudos, settings=settings, kpoints=resolved_kpoints
@@ -1718,10 +1717,10 @@ def pw_base_graph(
     stdev = 0.01
     parent = parent_folder
     if plan_ionic.rattle_now and run.output_structure is not None:
-        rattled = rattle_positions.alias('rattle_task')(structure=run.output_structure, stdev=stdev)
+        rattled = rattle_positions(structure=run.output_structure, stdev=stdev).alias('rattle_task')
     else:
         rattled = structure
-    guard = require_pw_restart_nodes(
+    guard = require_pw_restart_nodes(  # noqa: F841 - enforce validation or cleanup in source order
         restart=plan_bands.restart,
         parent_mode=plan_bands.parent_mode,
         structure_from_output=plan_bands.structure_from_output,
@@ -1735,7 +1734,6 @@ def pw_base_graph(
         parent_mode=plan_bands.parent_mode,
         rattle_now=plan_bands.rattle_now,
         rattled_before=False,
-        after=guard,
     )
     if plan_bands.structure_from_output and run.output_structure is not None:
         structure = run.output_structure
@@ -1814,10 +1812,10 @@ def pw_base_graph(
             rattle_now=plan_ionic.rattle_now,
         )
         if plan_ionic.rattle_now and run.output_structure is not None:
-            rattled = rattle_positions.alias('rattle_task')(structure=run.output_structure, stdev=stdev)
+            rattled = rattle_positions(structure=run.output_structure, stdev=stdev).alias('rattle_task')
         else:
             rattled = structure
-        guard = require_pw_restart_nodes(
+        guard = require_pw_restart_nodes(  # noqa: F841 - enforce validation or cleanup in source order
             restart=plan_bands.restart,
             parent_mode=plan_bands.parent_mode,
             structure_from_output=plan_bands.structure_from_output,
@@ -1831,7 +1829,6 @@ def pw_base_graph(
             parent_mode=plan_bands.parent_mode,
             rattle_now=plan_bands.rattle_now,
             rattled_before=final.rattled,
-            after=guard,
         )
         if plan_bands.structure_from_output and run.output_structure is not None:
             structure = run.output_structure
@@ -1897,9 +1894,9 @@ def ph_base_graph(
     for ``ONLY_INITIALIZATION`` and single runs. ``remote_folder`` is the last run's folder.
     """
     if qpoints is None:
-        resolved_qpoints = make_kpoints_mesh.alias('gen_kpoints')(
+        resolved_qpoints = make_kpoints_mesh(
             structure=structure, distance=qpoints_distance, force_parity=qpoints_force_parity
-        )
+        ).alias('gen_kpoints')
     else:
         resolved_qpoints = qpoints
     prepared_settings = prepare_ph_settings(settings=settings, only_initialization=only_initialization)
@@ -1961,7 +1958,7 @@ def ph_base_graph(
         parent_mode=plan_walltime_out.parent_mode,
     )
     parent = parent_folder
-    guard = require_ph_restart_nodes(
+    guard = require_ph_restart_nodes(  # noqa: F841 - enforce validation or cleanup in source order
         restart=plan_convergence.restart,
         parent_mode=plan_convergence.parent_mode,
         remote_folder=run.remote_folder,
@@ -1972,7 +1969,6 @@ def ph_base_graph(
         recover=plan_convergence.recover,
         parent_mode=plan_convergence.parent_mode,
         recover_before=False,
-        after=guard,
     )
     if final.keep_parent:
         parent = parent  # noqa: PLW0127 - keep arm rebinds the same wire to stay nullable
@@ -2037,7 +2033,7 @@ def ph_base_graph(
             recover=plan_walltime_out.recover,
             parent_mode=plan_walltime_out.parent_mode,
         )
-        guard = require_ph_restart_nodes(
+        guard = require_ph_restart_nodes(  # noqa: F841 - enforce validation or cleanup in source order
             restart=plan_convergence.restart,
             parent_mode=plan_convergence.parent_mode,
             remote_folder=run.remote_folder,
@@ -2048,7 +2044,6 @@ def ph_base_graph(
             recover=plan_convergence.recover,
             parent_mode=plan_convergence.parent_mode,
             recover_before=final.recover,
-            after=guard,
         )
         if final.keep_parent:
             parent = parent  # noqa: PLW0127 - keep arm rebinds the same wire to stay nullable
@@ -2061,7 +2056,7 @@ def ph_base_graph(
         return Err(RestartErrors.MAXIMUM_ITERATIONS_EXCEEDED)
     if run.error is not None:
         return Err(RestartErrors.UNHANDLED_FAILURE)
-    merge_checked = validate_ph_merge(
+    merge_checked = validate_ph_merge(  # noqa: F841 - enforce validation or cleanup in source order
         expected=check.expected,
         found=check.found,
         runs=check.runs,
@@ -2069,7 +2064,7 @@ def ph_base_graph(
         has_expected=check.has_expected,
         only_initialization=only_initialization,
     )
-    report = summarize_restart(attempts=attempts, status='finished', after=merge_checked)
+    report = summarize_restart(attempts=attempts, status='finished')
     if merged is None:
         output_parameters = run.output_parameters
     else:
@@ -2107,9 +2102,9 @@ def neb_base_graph(
     """
     last_structure = final_neb_image_structure(images=images)
     if kpoints is None:
-        resolved_kpoints = make_kpoints_mesh.alias('gen_kpoints')(
+        resolved_kpoints = make_kpoints_mesh(
             structure=last_structure, distance=kpoints_distance, force_parity=kpoints_force_parity
-        )
+        ).alias('gen_kpoints')
     else:
         resolved_kpoints = kpoints
     tried = seed_diagonalizations(parameters=pw_parameters)
@@ -2155,7 +2150,7 @@ def neb_base_graph(
         parent_mode=plan_nstep.parent_mode,
     )
     parent = parent_folder
-    guard = require_neb_restart_nodes(
+    guard = require_neb_restart_nodes(  # noqa: F841 - enforce validation or cleanup in source order
         restart=plan_electronic.restart,
         parent_mode=plan_electronic.parent_mode,
         remote_folder=run.remote_folder,
@@ -2166,7 +2161,6 @@ def neb_base_graph(
         tried=plan_electronic.tried,
         restart=plan_electronic.restart,
         parent_mode=plan_electronic.parent_mode,
-        after=guard,
     )
     if final.keep_parent:
         parent = parent  # noqa: PLW0127 - keep arm rebinds the same wire to stay nullable
@@ -2218,7 +2212,7 @@ def neb_base_graph(
             restart=plan_nstep.restart,
             parent_mode=plan_nstep.parent_mode,
         )
-        guard = require_neb_restart_nodes(
+        guard = require_neb_restart_nodes(  # noqa: F841 - enforce validation or cleanup in source order
             restart=plan_electronic.restart,
             parent_mode=plan_electronic.parent_mode,
             remote_folder=run.remote_folder,
@@ -2229,7 +2223,6 @@ def neb_base_graph(
             tried=plan_electronic.tried,
             restart=plan_electronic.restart,
             parent_mode=plan_electronic.parent_mode,
-            after=guard,
         )
         if final.keep_parent:
             parent = parent  # noqa: PLW0127 - keep arm rebinds the same wire to stay nullable

@@ -27,14 +27,10 @@ and validate without launching anything with ``assert pdos_from_scratch_parallel
 Serial versus parallel
 ----------------------
 
-The legacy ``serial_clean`` flag is replaced by explicit variants. The
-``*_parallel`` graphs run DOS and PROJWFC as soon as their inputs are ready, so
-the engine may run them concurrently. The ``*_serial`` graphs order
-DOS → cleanup → PROJWFC with an unconditional ``after`` edge, faithfully
-serializing the pair; the DOS remote is swept before PROJWFC submits, and the
-SCF remote (from-scratch roots) is swept after the stage. ``clean_workdir``
-only controls the final sweep of the remaining remotes. There is no
-branch-dependent ``after``: each variant hard-codes its own ordering.
+The ``*_parallel`` variants let DOS and PROJWFC run concurrently in a dataflow
+block and wait for both to succeed before cleanup and reporting. The ``*_serial``
+variants sweep the DOS remote before PROJWFC submits. ``clean_workdir`` controls
+the final cleanup of remaining remotes.
 
 Scheduler options
 -----------------
@@ -103,7 +99,7 @@ Honest limits of this rewrite (see ``reports/STATUS.md``):
 import copy
 import typing as t
 
-from aiida.engine import graph, task
+from aiida.engine import dataflow, forward_outputs, graph, task
 from aiida.orm import BandsData, Code, DataDict, Dict, Float, KpointsData, RemoteData, StructureData, XyData
 from aiida.orm.nodes.data.array.projection import ProjectionData
 
@@ -476,11 +472,11 @@ def pdos_stage_parallel(
     clean_workdir: bool = False,
     monitors: DataDict | None = None,
 ) -> PdosStageOutputs:
-    """Run NSCF then DOS and PROJWFC concurrently from one parent folder, then report.
+    """Run NSCF, DOS, and PROJWFC without an intermediate remote sweep.
 
-    The NSCF parameters resolve the band-count rule first; its bands window then feeds both post-processing
-    parameter sets, which the matcher compares before either calculation submits. DOS and PROJWFC run as soon as
-    their inputs are ready, so the engine may run them concurrently. The final sweep covers ``clean_workdir``.
+    The NSCF parameters resolve the band-count rule first; its bands window feeds both post-processing
+    parameter sets, which the matcher compares before either calculation submits. The final sweep covers
+    ``clean_workdir``.
 
     :param structure: the structure the NSCF run computes.
     :param parent_folder: the SCF (or caller-provided) remote folder the NSCF run restarts from.
@@ -509,7 +505,7 @@ def pdos_stage_parallel(
         parent_parameters=parent_output_parameters,
         nbands_factor=nbands_factor,
     )
-    nscf_run = pw_base_graph.alias('nscf')(
+    nscf_run = pw_base_graph(
         code=pw_code,
         structure=structure,
         pseudos=pseudos,
@@ -519,12 +515,11 @@ def pdos_stage_parallel(
         kpoints_distance=nscf_kpoints_distance,
         parent_folder=parent_folder,
         monitors=monitors,
-    )
-    nscf_checked = require_pdos_base(report=nscf_run.report, stage='nscf')
+    ).alias('nscf')
+    nscf_checked = require_pdos_base(report=nscf_run.report, stage='nscf')  # noqa: F841 - enforce validation or cleanup in source order
     window = extract_nscf_window(
         output_parameters=nscf_run.output_parameters,
         output_band=nscf_run.output_band,
-        after=nscf_checked,
     )
     matched = resolve_post_windows(
         dos_parameters=dos_parameters,
@@ -534,18 +529,19 @@ def pdos_stage_parallel(
         fermi=window.fermi,
         energy_range_vs_fermi=energy_range_vs_fermi,
     )
-    dos_run = dos_calc(
-        code=dos_code,
-        settings=dos_settings,
-        parameters=matched.dos,
-        parent_folder=nscf_run.remote_folder,
-    )
-    projwfc_run = projwfc_calc(
-        code=projwfc_code,
-        settings=projwfc_settings,
-        parameters=matched.projwfc,
-        parent_folder=nscf_run.remote_folder,
-    )
+    with dataflow():
+        dos_run = dos_calc(
+            code=dos_code,
+            settings=dos_settings,
+            parameters=matched.dos,
+            parent_folder=nscf_run.remote_folder,
+        )
+        projwfc_run = projwfc_calc(
+            code=projwfc_code,
+            settings=projwfc_settings,
+            parameters=matched.projwfc,
+            parent_folder=nscf_run.remote_folder,
+        )
     swept = sweep_stage(  # noqa: F841
         nscf_folder=nscf_run.remote_folder,
         dos_folder=dos_run.remote_folder,
@@ -560,7 +556,7 @@ def pdos_stage_parallel(
         mode='parallel',
     )
     return {
-        'nscf': nscf_run,
+        'nscf': forward_outputs(nscf_run, exclude=('report',)),
         'dos': dos_run,
         'projwfc': projwfc_run,
         'nscf_remote_folder': nscf_run.remote_folder,
@@ -607,9 +603,8 @@ def pdos_stage_serial(
 ) -> PdosStageOutputs:
     """Run NSCF then DOS, sweep DOS, then PROJWFC from one parent folder, then report.
 
-    The unconditional ``after`` edge from the DOS sweep into PROJWFC serializes the
-    pair, matching the legacy ``serial_clean`` order DOS → cleanup → PROJWFC. The
-    DOS remote is swept promptly before PROJWFC submits; the final sweep covers
+    Source order matches the legacy ``serial_clean`` order DOS → cleanup → PROJWFC.
+    The DOS remote is swept before PROJWFC submits; the final sweep covers
     ``clean_workdir`` for the remaining remotes.
 
     :param structure: the structure the NSCF run computes.
@@ -639,7 +634,7 @@ def pdos_stage_serial(
         parent_parameters=parent_output_parameters,
         nbands_factor=nbands_factor,
     )
-    nscf_run = pw_base_graph.alias('nscf')(
+    nscf_run = pw_base_graph(
         code=pw_code,
         structure=structure,
         pseudos=pseudos,
@@ -649,12 +644,11 @@ def pdos_stage_serial(
         kpoints_distance=nscf_kpoints_distance,
         parent_folder=parent_folder,
         monitors=monitors,
-    )
-    nscf_checked = require_pdos_base(report=nscf_run.report, stage='nscf')
+    ).alias('nscf')
+    nscf_checked = require_pdos_base(report=nscf_run.report, stage='nscf')  # noqa: F841 - enforce validation or cleanup in source order
     window = extract_nscf_window(
         output_parameters=nscf_run.output_parameters,
         output_band=nscf_run.output_band,
-        after=nscf_checked,
     )
     matched = resolve_post_windows(
         dos_parameters=dos_parameters,
@@ -670,23 +664,19 @@ def pdos_stage_serial(
         parameters=matched.dos,
         parent_folder=nscf_run.remote_folder,
     )
-    dos_swept = sweep_remote(folder=dos_run.remote_folder, enabled=True)
+    dos_swept = sweep_remote(folder=dos_run.remote_folder, enabled=True)  # noqa: F841 - enforce validation or cleanup in source order
     projwfc_run = projwfc_calc(
         code=projwfc_code,
         settings=projwfc_settings,
         parameters=matched.projwfc,
         parent_folder=nscf_run.remote_folder,
-        after=dos_swept,
     )
-    projwfc_swept = sweep_remote.alias('projwfc_swept')(
-        folder=projwfc_run.remote_folder, enabled=True, after=projwfc_run
-    )
+    projwfc_swept = sweep_remote(folder=projwfc_run.remote_folder, enabled=True).alias('projwfc_swept')  # noqa: F841 - enforce validation or cleanup in source order
     swept = sweep_stage(  # noqa: F841
         nscf_folder=nscf_run.remote_folder,
         dos_folder=dos_run.remote_folder,
         projwfc_folder=projwfc_run.remote_folder,
         enabled=clean_workdir,
-        after=projwfc_swept,
     )
     report = summarize_pdos(
         output_parameters=nscf_run.output_parameters,
@@ -696,7 +686,7 @@ def pdos_stage_serial(
         mode='serial',
     )
     return {
-        'nscf': nscf_run,
+        'nscf': forward_outputs(nscf_run, exclude=('report',)),
         'dos': dos_run,
         'projwfc': projwfc_run,
         'nscf_remote_folder': nscf_run.remote_folder,
@@ -748,10 +738,10 @@ def pdos_from_scratch_parallel(
     scf_monitors: DataDict | None = None,
     nscf_monitors: DataDict | None = None,
 ) -> PdosFromScratchOutputs:
-    """Compute total and partial densities of states, running SCF first, DOS/PROJWFC concurrently.
+    """Compute total and partial densities of states without intermediate cleanup.
 
     The SCF base run feeds its remote folder and band count into the shared
-    parallel stage. The SCF remote is swept at the end only when
+    post-processing stage. The SCF remote is swept at the end only when
     ``clean_workdir`` holds. Scheduler options ride at launch under
     ``runtime_config`` (see the module docstring).
 
@@ -781,7 +771,7 @@ def pdos_from_scratch_parallel(
     :return: the SCF products, the stage products, and the summary report.
     """
     checked_scf_parameters = require_scf_parameters(parameters=scf_parameters)
-    scf_run = pw_base_graph.alias('scf')(
+    scf_run = pw_base_graph(
         code=pw_code,
         structure=structure,
         pseudos=pseudos,
@@ -790,8 +780,8 @@ def pdos_from_scratch_parallel(
         kpoints=scf_kpoints,
         kpoints_distance=scf_kpoints_distance,
         monitors=scf_monitors if scf_monitors is not None else monitors,
-    )
-    scf_checked = require_pdos_base(report=scf_run.report, stage='scf')
+    ).alias('scf')
+    scf_checked = require_pdos_base(report=scf_run.report, stage='scf')  # noqa: F841 - enforce validation or cleanup in source order
     stage = pdos_stage_parallel(
         structure=structure,
         parent_folder=scf_run.remote_folder,
@@ -813,11 +803,10 @@ def pdos_from_scratch_parallel(
         stages=2,
         clean_workdir=clean_workdir,
         monitors=nscf_monitors if nscf_monitors is not None else monitors,
-        after=scf_checked,
     )
-    scf_final = sweep_remote.alias('scf_final')(folder=scf_run.remote_folder, enabled=clean_workdir, after=stage)  # noqa: F841
+    scf_final = sweep_remote(folder=scf_run.remote_folder, enabled=clean_workdir).alias('scf_final')  # noqa: F841
     return {
-        'scf': scf_run,
+        'scf': forward_outputs(scf_run, exclude=('report',)),
         'scf_remote_folder': scf_run.remote_folder,
         'scf_output_parameters': scf_run.output_parameters,
         'scf_output_band': scf_run.output_band,
@@ -902,7 +891,7 @@ def pdos_from_scratch_serial(
     :return: the SCF products, the stage products, and the summary report.
     """
     checked_scf_parameters = require_scf_parameters(parameters=scf_parameters)
-    scf_run = pw_base_graph.alias('scf')(
+    scf_run = pw_base_graph(
         code=pw_code,
         structure=structure,
         pseudos=pseudos,
@@ -911,8 +900,8 @@ def pdos_from_scratch_serial(
         kpoints=scf_kpoints,
         kpoints_distance=scf_kpoints_distance,
         monitors=scf_monitors if scf_monitors is not None else monitors,
-    )
-    scf_checked = require_pdos_base(report=scf_run.report, stage='scf')
+    ).alias('scf')
+    scf_checked = require_pdos_base(report=scf_run.report, stage='scf')  # noqa: F841 - enforce validation or cleanup in source order
     stage = pdos_stage_serial(
         structure=structure,
         parent_folder=scf_run.remote_folder,
@@ -934,12 +923,11 @@ def pdos_from_scratch_serial(
         stages=2,
         clean_workdir=clean_workdir,
         monitors=nscf_monitors if nscf_monitors is not None else monitors,
-        after=scf_checked,
     )
-    scf_swept = sweep_remote(folder=scf_run.remote_folder, enabled=True, after=stage)
-    scf_final = sweep_remote.alias('scf_final')(folder=scf_run.remote_folder, enabled=clean_workdir, after=scf_swept)  # noqa: F841
+    scf_swept = sweep_remote(folder=scf_run.remote_folder, enabled=True)  # noqa: F841 - enforce validation or cleanup in source order
+    scf_final = sweep_remote(folder=scf_run.remote_folder, enabled=clean_workdir).alias('scf_final')  # noqa: F841
     return {
-        'scf': scf_run,
+        'scf': forward_outputs(scf_run, exclude=('report',)),
         'scf_remote_folder': scf_run.remote_folder,
         'scf_output_parameters': scf_run.output_parameters,
         'scf_output_band': scf_run.output_band,
@@ -991,7 +979,7 @@ def pdos_from_parent_parallel(
     clean_workdir: bool = False,
     monitors: DataDict | None = None,
 ) -> PdosFromParentOutputs:
-    """Compute total and partial densities of states from a caller-provided folder, concurrently.
+    """Compute total and partial densities of states from a caller-provided folder.
 
     Mirrors the legacy chain without the ``scf`` inputs: the caller hands over
     the NSCF parent folder directly. ``parent_output_parameters`` only matters

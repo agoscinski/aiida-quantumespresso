@@ -23,7 +23,7 @@ if not hasattr(aiida.engine, 'graph'):
     pytest.skip('Experimental graphs require the pinned aiida-core 3.x fork', allow_module_level=True)
 
 from aiida import orm
-from aiida.engine import run_get_node, task
+from aiida.engine import graph, run_get_node, task
 
 from aiida_quantumespresso.calculations.pw import PwCalculation
 from aiida_quantumespresso.tools.monitors.accuracy_stuck import (
@@ -184,6 +184,53 @@ def _substitute(monkeypatch, stub):
     monkeypatch.setattr(base, 'pw_calc_monitored', monitored)
     monkeypatch.setattr(base.pw_base_graph, '_template', None)
     return monitored
+
+
+specialized_monitor_calc = task(StuckRelaxPwCalc, inputs={'monitors': {'stuck': orm.Dict}})
+
+
+@graph
+def nullable_monitor_graph(
+    code: orm.Code,
+    structure: orm.StructureData,
+    pseudos: orm.DataDict,
+    kpoints: orm.KpointsData,
+    stuck: orm.Dict,
+    enabled: bool,
+) -> orm.Dict:
+    """Wire a branch-selected monitor to a fixed leaf of the dynamic namespace."""
+    selected = stuck if enabled else None
+    run = specialized_monitor_calc(
+        code=code,
+        structure=structure,
+        pseudos=pseudos,
+        kpoints=kpoints,
+        parameters={'CONTROL': {'calculation': 'relax'}, 'IONS': {'upscale': 1}},
+        monitors={'stuck': selected},
+    )
+    return run.output_parameters
+
+
+@pytest.mark.usefixtures('aiida_profile_clean')
+@pytest.mark.parametrize('enabled', [False, True], ids=['omitted', 'present'])
+def test_specialized_monitor_leaf_accepts_nullable_wire(enabled: bool, aiida_code_installed) -> None:
+    """The same placement omits an absent monitor and links a supplied monitor node."""
+    code = aiida_code_installed(label='test.nullable-monitor', default_calc_job_plugin='quantumespresso.pw')
+    monitor = orm.Dict(_monitors()['stuck'].get_dict())
+    _, node = run_get_node(
+        nullable_monitor_graph,
+        code=code,
+        structure=_silicon(),
+        pseudos=_pseudos('Si'),
+        kpoints=_kpoints(),
+        stuck=monitor,
+        enabled=enabled,
+    )
+    assert node.is_finished_ok, node.exit_message
+    calc = next(child for child in node.called if isinstance(child, orm.CalcJobNode))
+    assert ('monitors__stuck' in _incoming_labels(calc)) is enabled
+    if enabled:
+        assert calc.inputs.monitors.stuck.uuid == monitor.uuid
 
 
 def test_build_covers_monitor_wiring() -> None:

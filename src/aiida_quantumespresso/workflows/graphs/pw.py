@@ -609,7 +609,7 @@ def init_relax_guarded(
         init_kpoints_force_parity=init_kpoints_force_parity,
         init_monitors=init_monitors,
     )
-    base = pw_base_graph.alias('initial')(
+    base = pw_base_graph(
         code=code,
         structure=structure,
         pseudos=pseudos,
@@ -620,9 +620,9 @@ def init_relax_guarded(
         kpoints_force_parity=resolved.force_parity,
         parent_folder=parent_folder,
         monitors=resolved.monitors,
-    )
-    checked = require_relax_base(report=base.report)
-    return ensure_structure(candidate=base.output_structure, after=checked)
+    ).alias('initial')
+    checked = require_relax_base(report=base.report)  # noqa: F841 - enforce validation or cleanup in source order
+    return ensure_structure(candidate=base.output_structure)
 
 
 @graph
@@ -721,7 +721,7 @@ def pw_relax_graph(
     final_output_atomic_occupations = seed.output_atomic_occupations
     final_remote_folder = seed.remote_folder
     while rerun and attempts < max_iterations:
-        step = pw_base_graph.alias('main')(
+        step = pw_base_graph(
             code=code,
             structure=current,
             pseudos=pseudos,
@@ -732,7 +732,7 @@ def pw_relax_graph(
             kpoints_force_parity=kpoints_force_parity,
             parent_folder=parent_folder,
             monitors=monitors,
-        )
+        ).alias('main')
         decision = prepare_next_relax(
             parameters=params,
             output_parameters=step.output_parameters,
@@ -841,7 +841,7 @@ def pw_bands_graph(
         scf_structure = path.primitive_structure
     else:
         scf_structure = structure
-    scf_run = pw_base_graph.alias('scf')(
+    scf_run = pw_base_graph(
         code=scf_code,
         structure=scf_structure,
         pseudos=pseudos,
@@ -850,15 +850,14 @@ def pw_bands_graph(
         kpoints=scf_kpoints,
         kpoints_distance=scf_kpoints_distance,
         monitors=scf_monitors if scf_monitors is not None else monitors,
-    )
-    scf_checked = require_base_finished(report=scf_run.report, stage='scf')
+    ).alias('scf')
+    scf_checked = require_base_finished(report=scf_run.report, stage='scf')  # noqa: F841 - enforce validation or cleanup in source order
     resolved = resolve_bands_parameters(
         scf_output_parameters=scf_run.output_parameters,
         bands_parameters=bands_parameters,
         nbands_factor=nbands_factor,
-        after=scf_checked,
     )
-    bands_run = pw_base_graph.alias('bands')(
+    bands_run = pw_base_graph(
         code=bands_code,
         structure=scf_structure,
         pseudos=pseudos,
@@ -867,8 +866,8 @@ def pw_bands_graph(
         kpoints=path.explicit_kpoints,
         parent_folder=scf_run.remote_folder,
         monitors=bands_monitors if bands_monitors is not None else monitors,
-    )
-    bands_checked = require_base_finished.alias('check_bands')(report=bands_run.report, stage='bands')  # noqa: F841
+    ).alias('bands')
+    bands_checked = require_base_finished(report=bands_run.report, stage='bands').alias('check_bands')  # noqa: F841
     return {
         'band_structure': bands_run.output_band,
         'scf_parameters': scf_run.output_parameters,

@@ -35,6 +35,7 @@ if not hasattr(aiida.engine, 'graph'):
     pytest.skip('Experimental graphs require the pinned aiida-core 3.x fork', allow_module_level=True)
 
 from aiida import orm
+from aiida.engine import DeferredGraphInput, ResolvedGraphInput
 
 from aiida_quantumespresso.workflows.graphs import protocols
 from aiida_quantumespresso.workflows.graphs.pdos import pdos_from_scratch_serial
@@ -276,6 +277,31 @@ def test_production_bands_per_stage_settings_and_cutoffs(aiida_code_installed) -
     assert launch['runtime_config']['scf']['pw_calc_monitored'] == launch['runtime_config']['scf']['pw_calc']
     assert launch['runtime_config']['bands']['pw_calc_monitored'] == launch['runtime_config']['bands']['pw_calc']
     assert pw_bands_graph.build() is None
+
+
+def test_prepared_bands_preview_shows_resolved_and_deferred_inputs(aiida_code_installed) -> None:
+    """Preview a protocol launch without running SCF or guessing its output folder."""
+    code = aiida_code_installed(label='test.preview-bands', default_calc_job_plugin='quantumespresso.pw')
+    prepared = protocols.prepare_run_from_protocol(
+        'pw_bands',
+        structure=_silicon(),
+        scf_code=code,
+        bands_code=code,
+        pseudos={'Si': _upf()},
+        overrides=_cutoffs('scf', 'bands'),
+    )
+
+    preview = pw_bands_graph.build(prepared_run=prepared)
+
+    placements = {placement.address: placement for placement in preview.placements}
+    for scope in ('scf', 'bands'):
+        placement = placements[f'{scope}.pw_calc']
+        assert placement.inputs['code'] == ResolvedGraphInput(code)
+        assert placement.inputs['metadata.options.max_wallclock_seconds'] == ResolvedGraphInput(_WALLCLOCK)
+        assert any(region.endswith(':loop') for region in placement.regions)
+        assert any(region.endswith((':if', ':else')) for region in placement.regions)
+    assert isinstance(placements['bands.pw_calc'].inputs['parent_folder'], DeferredGraphInput)
+    assert orm.QueryBuilder().append(orm.ProcessNode).count() == 0
 
 
 def test_production_pdos_serial_carries_nscf_cutoff(aiida_code_installed) -> None:
