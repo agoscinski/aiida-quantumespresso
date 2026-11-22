@@ -352,7 +352,7 @@ def test_stage_scopes_follow_authored_aliases() -> None:
 
     The checks compile the production graphs themselves (no copies): the NSCF
     base run descends through the ``nscf`` alias to the shared
-    ``pw_calc``/``pw_calc_monitored`` leaves, the post-processing placements keep
+    ``pw_calc`` leaf, the post-processing placements keep
     their stable names, and no placement calls ``pw_base_graph`` directly or carries
     a generated suffix.
     """
@@ -360,7 +360,6 @@ def test_stage_scopes_follow_authored_aliases() -> None:
 
     expected_stage = {
         ('nscf', 'pw_calc'),
-        ('nscf', 'pw_calc_monitored'),
         ('dos_calc',),
         ('projwfc_calc',),
     }
@@ -372,13 +371,12 @@ def test_roots_nest_stage_beside_scf_scope() -> None:
     """The compiled from-scratch roots nest the stage scope beside the SCF scope.
 
     The from-parent roots carry only the stage scope. Both variants address
-    every ``CalcJob`` placement exactly once per monitor shape with no generated suffixes.
+    every ``CalcJob`` placement exactly once with no generated suffixes.
     """
     from aiida.engine.processes.graphs.lowering import compile_graph
 
     expected_stage = {
         ('nscf', 'pw_calc'),
-        ('nscf', 'pw_calc_monitored'),
         ('dos_calc',),
         ('projwfc_calc',),
     }
@@ -388,7 +386,6 @@ def test_roots_nest_stage_beside_scf_scope() -> None:
     ):
         assert _calcjob_paths(compile_graph(root)) == {
             ('scf', 'pw_calc'),
-            ('scf', 'pw_calc_monitored'),
             *[(stage, *path) for path in expected_stage],
         }
     for root, stage in (

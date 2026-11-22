@@ -32,21 +32,16 @@ callee alias adds one level; the ``CalcJob`` placement alias holds the normal
 process input mapping (with a ``metadata`` key) at the leaf. Branch and loop control frames are transparent:
 iterations reuse their placement's configuration and add no key level. The
 relax scopes are the initial wrapper plus its inner alias and the main-loop
-alias; the bands scopes are ``scf`` and ``bands``. Each ``pw`` scope carries
-both static placements (``pw_calc`` unmonitored plus ``pw_calc_monitored``)
-with identical scheduler options::
+alias; the bands scopes are ``scf`` and ``bands``. Each PW scope carries
+one ``pw_calc`` placement::
 
     runtime_config = {
-        'init_relax_guarded': {'initial': {'pw_calc': {'metadata': {'options': init_options}},
-                                           'pw_calc_monitored': {'metadata': {'options': init_options}}}},
-        'main': {'pw_calc': {'metadata': {'options': main_options}},
-                 'pw_calc_monitored': {'metadata': {'options': main_options}}},
+        'init_relax_guarded': {'initial': {'pw_calc': {'metadata': {'options': init_options}}}},
+        'main': {'pw_calc': {'metadata': {'options': main_options}}},
     }
     runtime_config = {
-        'scf': {'pw_calc': {'metadata': {'options': scf_options}},
-                'pw_calc_monitored': {'metadata': {'options': scf_options}}},
-        'bands': {'pw_calc': {'metadata': {'options': bands_options}},
-                  'pw_calc_monitored': {'metadata': {'options': bands_options}}},
+        'scf': {'pw_calc': {'metadata': {'options': scf_options}}},
+        'bands': {'pw_calc': {'metadata': {'options': bands_options}}},
     }
 
 The experimental ``options`` ports of the previous revision were removed rather
@@ -66,9 +61,8 @@ Honest limits of this rewrite (see ``reports/STATUS.md``):
   ``output_parameters``/``output_structure?``/``output_band?``/``output_trajectory?``/
   ``remote_folder``/``report``. Pseudopotentials travel as a ``DataDict`` (kind name to ``UpfData``).
   Each composite below calls it only through the inline aliases
-  (``scf``/``bands``/``initial``/``main``), each containing the base's dual
-  ``pw_calc``/``pw_calc_monitored`` placements (identical scheduler options on
-  both leaves). Considered-finished base outcomes (``501``
+  (``scf``/``bands``/``initial``/``main``), each containing the base's
+  ``pw_calc`` placement. Considered-finished base outcomes (``501``
   ``finished_ionic_convergence_reached_except_final_scf`` and ``710``
   ``finished_electronic_convergence_warning``) stay usable downstream: the
   runtime keeps the failed run's stored outputs alongside the synthesized error.

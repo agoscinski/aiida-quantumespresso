@@ -25,6 +25,11 @@
 
 ### Breaking changes (experimental graph API only)
 
+* PW graph attempts now use one `pw_calc` placement. For direct graph launches,
+  rename `pw_calc_monitored` in `runtime_config` to `pw_calc` and pass monitor
+  definitions via the graph's `monitors` input. Protocol helpers still accept the
+  old scheduler override key if it does not conflict with `pw_calc`.
+
 * `task_metadata` is now nested by authored graph-call names, with normal CalcJob
   metadata at the leaves. Native graph aliases (`scf`, `nscf`, `bands`, `initial`,
   `main`) distinguish reused base graphs. Flat nested-task keys, provenance-label

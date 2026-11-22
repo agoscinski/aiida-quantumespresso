@@ -253,19 +253,16 @@ def test_relax_scopes_follow_authored_aliases() -> None:
     ``init_relax_guarded`` wrapper scope, the main loop places ``main`` with
     no generated suffix, and no placement calls ``pw_base_graph`` directly.
     Each base call site carries both the plain ``pw_calc`` and the monitored
-    ``pw_calc_monitored`` (static ``monitors.stuck``) placements.
+    ``pw_calc`` placement.
     """
     from aiida.engine.processes.graphs.lowering import compile_graph
 
     assert _calcjob_paths(compile_graph(pw_relax_graph)) == {
         ('init_relax_guarded', 'initial', 'pw_calc'),
-        ('init_relax_guarded', 'initial', 'pw_calc_monitored'),
         ('main', 'pw_calc'),
-        ('main', 'pw_calc_monitored'),
     }
     assert _calcjob_paths(compile_graph(pw_module.init_relax_guarded)) == {
         ('initial', 'pw_calc'),
-        ('initial', 'pw_calc_monitored'),
     }
 
 
@@ -273,16 +270,14 @@ def test_bands_scopes_follow_authored_aliases() -> None:
     """The compiled bands graph addresses SCF/bands through ``scf``/``bands``.
 
         The check compiles the production graph itself (no copies): each stage
-        descends exactly one level to the shared ``pw_calc``/``pw_calc_monitored``
+        descends exactly one level to the shared ``pw_calc``
     leaves with no generated numeric suffix and no direct ``pw_base_graph`` placement.
     """
     from aiida.engine.processes.graphs.lowering import compile_graph
 
     assert _calcjob_paths(compile_graph(pw_bands_graph)) == {
         ('scf', 'pw_calc'),
-        ('scf', 'pw_calc_monitored'),
         ('bands', 'pw_calc'),
-        ('bands', 'pw_calc_monitored'),
     }
 
 

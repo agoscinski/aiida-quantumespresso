@@ -27,7 +27,7 @@ The preview shows placement addresses, resolved inputs such as codes and schedul
 
 ## Still open
 
-- **PW monitors:** Production still uses separate monitored and unmonitored placements. A focused test shows that a single placement can omit a branch-selected monitor; consolidation would also need to account for both existing runtime-config addresses.
+- **PW monitors:** The initial attempt and retries share one `pw_calc` address, with `monitors.stuck` omitted when absent. QE protocol helpers translate old `pw_calc_monitored` scheduler overrides and reject conflicting values. In direct graph launches, rename that key to `pw_calc`, and pass monitor definitions via the graph's `monitors` input rather than `runtime_config`.
 - **Composite exit codes and output parity:** PW, PH, and NEB return declared statuses for terminal retry failures. PW 501/710 outcomes still expose usable outputs to callers that accept them. Composite stage-specific exit codes and exact legacy PDOS output parity remain open.
 - **PH merge provenance:** Exact legacy merge provenance remains open.
 - **Process cancellation:** Cleanup already refuses to act on active descendants. The [child-cancellation issue](../../reports/process-kill-skips-children.md) is a separate process-engine bug.

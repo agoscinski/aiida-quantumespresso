@@ -1498,12 +1498,9 @@ class StuckMonitorResolution(t.TypedDict):
 def resolve_stuck_monitor(monitors: orm.DataDict | None) -> StuckMonitorResolution:
     """Extract the supported ``stuck`` monitor entry, if any, rejecting anything else.
 
-    The ``CalcJob`` ``monitors`` namespace is dynamic, so the graph cannot declare
-    an open mapping there; the monitored ``pw`` placement instead declares the one
-    known entry statically (``monitors.stuck``) while the plain placement wires no
-    monitor input at all. This boundary task converts the shared ``DataDict``
-    mapping: ``None`` or an empty mapping resolves to ``present=False`` (the graph
-    branches to the unmonitored placement), a single ``stuck`` ``Dict`` holding the
+    The graph declares the supported dynamic monitor leaf statically as
+    ``monitors.stuck``. An absent or empty mapping leaves the input unwired.
+    A single ``stuck`` ``Dict`` holding the
     structured ``quantumespresso.accuracy_stuck`` monitor resolves to an owned copy
     of it, and anything else fails fast naming the offending value. Only the
     structured variant (``kwargs['structured'] is True``, seeded when absent) can
@@ -1512,7 +1509,7 @@ def resolve_stuck_monitor(monitors: orm.DataDict | None) -> StuckMonitorResoluti
     monitor attaches. Allowed ``CalcJobMonitor`` runtime fields (for example
     ``priority``) are preserved untouched on the owned copy. Task outputs cannot
     return ``None``, so the absent path carries an empty mapping the graph never
-    wires. Downstream recovery still keys on the structured
+    uses. Downstream recovery still keys on the structured
     ``monitor_diagnostics['reason']``, never on this task.
     """
     if monitors is None or len(monitors) == 0:
@@ -1595,14 +1592,7 @@ def resolve_stuck_monitor(monitors: orm.DataDict | None) -> StuckMonitorResoluti
     return {'present': True, 'monitor': member.clone()}
 
 
-pw_calc = task(PwCalculation, errors=PwErrors)
-#: Monitored ``pw`` placement: the one supported entry is declared statically as
-#: ``monitors.stuck`` holding a monitor ``Dict``. Core static declarations are
-#: required when wired, so unmonitored runs use plain ``pw_calc`` (no monitor
-#: inputs at all) while monitored runs use this handle. Both share ``PwErrors``,
-#: including the considered-finished 501/710 members whose stored outputs stay
-#: available downstream alongside the synthesized error.
-pw_calc_monitored = task(PwCalculation, inputs={'monitors': {'stuck': orm.Dict}}, errors=PwErrors)
+pw_calc = task(PwCalculation, inputs={'monitors': {'stuck': orm.Dict}}, errors=PwErrors)
 ph_calc = task(PhCalculation, errors=PhErrors)
 neb_calc = task(NebCalculation, errors=NebErrors)
 q2r_calc = task(Q2rCalculation)
@@ -1646,19 +1636,13 @@ def pw_base_graph(
         resolved_kpoints = kpoints
     tried = seed_diagonalizations(parameters=parameters)
     stuck = resolve_stuck_monitor(monitors=monitors)
-    plain = partial(pw_calc, code=code, pseudos=pseudos, settings=settings, kpoints=resolved_kpoints)  # noqa: F821
-    monitored = partial(  # noqa: F821
-        pw_calc_monitored, code=code, pseudos=pseudos, settings=settings, kpoints=resolved_kpoints
+    monitor = stuck.monitor if stuck.present else None
+    launch_pw = partial(  # noqa: F821 - graph intrinsic
+        pw_calc, code=code, pseudos=pseudos, settings=settings, kpoints=resolved_kpoints
     )
-    if stuck.present:
-        run = monitored(
-            structure=structure,
-            parameters=parameters,
-            parent_folder=parent_folder,
-            monitors={'stuck': stuck.monitor},
-        )
-    else:
-        run = plain(structure=structure, parameters=parameters, parent_folder=parent_folder)
+    run = launch_pw(
+        structure=structure, parameters=parameters, parent_folder=parent_folder, monitors={'stuck': monitor}
+    )
     finished = classify_pw_finished(error=run.error)
     plan_walltime = handle_pw_walltime(error=run.error, parameters=parameters, tried=tried)
     plan_diagonalization = handle_pw_diagonalization(
@@ -1749,15 +1733,10 @@ def pw_base_graph(
     attempts = 1
     while ((run.error is not None and not finished.finished) or restart) and attempts < max_iterations:
         attempts = attempts + 1
-        if stuck.present:
-            run = monitored(
-                structure=structure,
-                parameters=final.parameters,
-                parent_folder=parent,
-                monitors={'stuck': stuck.monitor},
-            )
-        else:
-            run = plain(structure=structure, parameters=final.parameters, parent_folder=parent)
+        retry_monitor = stuck.monitor if stuck.present else None
+        run = launch_pw(
+            structure=structure, parameters=final.parameters, parent_folder=parent, monitors={'stuck': retry_monitor}
+        )
         finished = classify_pw_finished(error=run.error)
         plan_walltime = handle_pw_walltime(error=run.error, parameters=final.parameters, tried=final.tried)
         plan_diagonalization = handle_pw_diagonalization(

@@ -80,13 +80,9 @@ def _incoming_labels(node) -> list:
 def _pw_metadata() -> dict:
     """Return the launch metadata the ``pw`` placements need.
 
-    The first attempt and every retry share one scope per handle: loop
-    control is transparent, so no suffixed or per-iteration key exists. Both the
-    plain ``pw_calc`` and the monitored ``pw_calc_monitored`` (static
-    ``monitors.stuck``) placements need a scope since only one branch executes
-    per launch but validation covers every placement.
+    The first attempt and every retry share one scope.
     """
-    return {'pw_calc': {'metadata': {'options': {}}}, 'pw_calc_monitored': {'metadata': {'options': {}}}}
+    return {'pw_calc': {'metadata': {'options': {}}}}
 
 
 class _MonitorStubBase(PwCalculation):
@@ -174,16 +170,10 @@ class ConditionalPwCalc(_MonitorStubBase):
 def _substitute(monkeypatch, stub):
     """Replace both ``pw`` placements with a stub task, recompiling the production graph.
 
-    The production graph uses plain ``pw_calc`` for unmonitored runs and
-    ``pw_calc_monitored`` (static ``monitors.stuck``) for monitored runs; both are
-    patched to the same stub so the real retry loop executes in either shape.
+    The production placement declares the optional ``monitors.stuck`` input.
     """
-    plain = task(stub, errors=PwErrors)
-    monitored = task(stub, inputs={'monitors': {'stuck': orm.Dict}}, errors=PwErrors)
-    monkeypatch.setattr(base, 'pw_calc', plain)
-    monkeypatch.setattr(base, 'pw_calc_monitored', monitored)
+    monkeypatch.setattr(base, 'pw_calc', task(stub, inputs={'monitors': {'stuck': orm.Dict}}, errors=PwErrors))
     monkeypatch.setattr(base.pw_base_graph, '_template', None)
-    return monitored
 
 
 specialized_monitor_calc = task(StuckRelaxPwCalc, inputs={'monitors': {'stuck': orm.Dict}})
@@ -377,17 +367,11 @@ def test_handle_pw_monitor_stuck_ignores_other_diagnostics() -> None:
 
 
 @pytest.mark.usefixtures('aiida_profile_clean')
-@pytest.mark.parametrize('configure_monitors', [False, True], ids=['graph-input', 'runtime-config'])
-def test_pw_base_graph_monitor_recovers_real_wiring(
-    monkeypatch, aiida_code_installed, configure_monitors: bool
-) -> None:
-    """Both graph-wired and launch-configured monitors trigger the same QE recovery."""
+def test_pw_base_graph_monitor_recovers_real_wiring(monkeypatch, aiida_code_installed) -> None:
+    """The monitor reaches the shared PW placement on the first run and retry."""
     _substitute(monkeypatch, StuckRelaxPwCalc)
     code = aiida_code_installed(label='test.pw-monitor', default_calc_job_plugin='quantumespresso.pw')
     monitors = _monitors()
-    config = _pw_metadata()
-    if configure_monitors:
-        config['pw_calc']['monitors'] = {'stuck': orm.Dict(monitors['stuck'].get_dict())}
     outputs, node = run_get_node(
         base.pw_base_graph,
         code=code,
@@ -395,8 +379,8 @@ def test_pw_base_graph_monitor_recovers_real_wiring(
         pseudos=_pseudos('Si'),
         parameters={'CONTROL': {'calculation': 'relax'}, 'SYSTEM': {}, 'ELECTRONS': {}},
         kpoints=_kpoints(),
-        monitors=None if configure_monitors else monitors,
-        runtime_config=config,
+        monitors=monitors,
+        runtime_config=_pw_metadata(),
     )
     assert node.is_finished_ok, node.exit_message
     assert outputs['report'].get_dict() == {'attempts': 2, 'status': 'finished'}

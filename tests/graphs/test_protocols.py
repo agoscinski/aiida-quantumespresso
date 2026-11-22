@@ -219,11 +219,6 @@ def test_launch_relax_explicit_pseudos(aiida_code_installed, generate_upf_data) 
         ]
         == 43200
     )
-    assert launch['runtime_config']['main']['pw_calc_monitored'] == launch['runtime_config']['main']['pw_calc']
-    assert (
-        launch['runtime_config']['init_relax_guarded']['initial']['pw_calc_monitored']
-        == launch['runtime_config']['init_relax_guarded']['initial']['pw_calc']
-    )
 
 
 def test_launch_relax_init_main_options_resolve_per_scope(monkeypatch, aiida_code_installed, generate_upf_data) -> None:
@@ -246,11 +241,6 @@ def test_launch_relax_init_main_options_resolve_per_scope(monkeypatch, aiida_cod
         == 1111
     )
     assert runtime_config['main']['pw_calc']['metadata']['options']['max_wallclock_seconds'] == 2222
-    assert runtime_config['main']['pw_calc_monitored'] == runtime_config['main']['pw_calc']
-    assert (
-        runtime_config['init_relax_guarded']['initial']['pw_calc_monitored']
-        == runtime_config['init_relax_guarded']['initial']['pw_calc']
-    )
     _, root = run_get_node(pw_relax_graph, **launch)
     assert root.is_finished_ok, root.exit_message
     children = sorted(_pw_calcs(root), key=lambda child: child.ctime)
@@ -416,9 +406,8 @@ def test_launch_bands_inputs(aiida_code_installed) -> None:
     runtime_config = launch['runtime_config']
     assert set(runtime_config) == {'scf', 'bands'}
     for scope in ('scf', 'bands'):
-        assert set(runtime_config[scope]) == {'pw_calc', 'pw_calc_monitored'}
+        assert set(runtime_config[scope]) == {'pw_calc'}
         assert runtime_config[scope]['pw_calc']['metadata']['options']['max_wallclock_seconds'] == 43200
-        assert runtime_config[scope]['pw_calc_monitored'] == runtime_config[scope]['pw_calc']
 
 
 def test_prepare_run_records_protocol_and_opt_in_policy(aiida_code_installed) -> None:
@@ -520,14 +509,9 @@ def test_launch_pdos_inputs(aiida_code_installed) -> None:
     assert launch['dos_parameters'].get_dict()['DOS']['deltae'] == pytest.approx(0.01)
     runtime_config = launch['runtime_config']
     assert set(runtime_config) == {'scf', 'pdos_stage_parallel'}
-    assert set(runtime_config['scf']) == {'pw_calc', 'pw_calc_monitored'}
+    assert set(runtime_config['scf']) == {'pw_calc'}
     assert set(runtime_config['pdos_stage_parallel']) == {'nscf', 'dos_calc', 'projwfc_calc'}
-    assert set(runtime_config['pdos_stage_parallel']['nscf']) == {'pw_calc', 'pw_calc_monitored'}
-    assert runtime_config['scf']['pw_calc_monitored'] == runtime_config['scf']['pw_calc']
-    assert (
-        runtime_config['pdos_stage_parallel']['nscf']['pw_calc_monitored']
-        == runtime_config['pdos_stage_parallel']['nscf']['pw_calc']
-    )
+    assert set(runtime_config['pdos_stage_parallel']['nscf']) == {'pw_calc'}
     for leaf in (
         runtime_config['scf']['pw_calc'],
         runtime_config['pdos_stage_parallel']['nscf']['pw_calc'],

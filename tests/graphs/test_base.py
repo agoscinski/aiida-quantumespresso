@@ -284,19 +284,14 @@ def _substitute(monkeypatch, stub, name, errors):
     patching the attribute redirects the real retry loop without copying its body.
     The compiled template is cached on the graph handle, so it is reset (and restored
     afterwards by ``monkeypatch``) to force recompilation against the substitute.
-    Pseudos wire directly through their static port; unmonitored runs use plain
-    ``pw_calc`` while monitored runs use ``pw_calc_monitored`` (static
-    ``monitors.stuck``). Both are patched to the same stub when the stub is a
-    ``PwCalculation`` so the real retry loop executes in either shape.
+    PW stubs retain the static optional monitor input.
     """
     if issubclass(stub, PwCalculation) and name == 'pw_calc':
-        plain = task(stub, errors=errors)
-        monitored = task(stub, inputs={'monitors': {'stuck': orm.Dict}}, errors=errors)
-        monkeypatch.setattr(base, 'pw_calc', plain)
-        monkeypatch.setattr(base, 'pw_calc_monitored', monitored)
+        shaped = task(stub, inputs={'monitors': {'stuck': orm.Dict}}, errors=errors)
+        monkeypatch.setattr(base, 'pw_calc', shaped)
         for handle in (base.pw_base_graph, base.neb_base_graph):
             monkeypatch.setattr(handle, '_template', None)
-        return monitored
+        return shaped
     shaped = task(stub, errors=errors)
     monkeypatch.setattr(base, name, shaped)
     for handle in (base.pw_base_graph, base.neb_base_graph):
@@ -306,7 +301,7 @@ def _substitute(monkeypatch, stub, name, errors):
 
 def _pw_metadata() -> dict:
     """Return the launch metadata both ``pw`` placements need."""
-    return {'pw_calc': {'metadata': {'options': {}}}, 'pw_calc_monitored': {'metadata': {'options': {}}}}
+    return {'pw_calc': {'metadata': {'options': {}}}}
 
 
 def _neb_metadata() -> dict:
@@ -329,7 +324,7 @@ def test_no_workchain_in_base_module() -> None:
     assert not hasattr(base, 'NebStaticWrapper')
     for handle in (
         base.pw_calc,
-        base.pw_calc_monitored,
+
         base.ph_calc,
         base.neb_calc,
         base.q2r_calc,
@@ -362,10 +357,9 @@ def test_pw_graph_places_calc_once_per_loop_iteration() -> None:
 
     placed = _collect(template.tasks)
     calc_placements = [entry for entry in placed if issubclass(entry.spec.process_class, PwCalculation)]
-    # One call site before the loop and one rebound inside it, each branching over the
-    # plain ``pw_calc`` (no monitor inputs) and ``pw_calc_monitored`` (static ``monitors.stuck``).
-    assert len(calc_placements) == 4
-    assert {entry.name for entry in calc_placements} == {'pw_calc', 'pw_calc_monitored'}
+    # The first attempt and retry share the same placement address.
+    assert len(calc_placements) == 2
+    assert {entry.name for entry in calc_placements} == {'pw_calc'}
     statuses = set()
     for entry in calc_placements:
         statuses.update(entry.spec.exit_codes.values())

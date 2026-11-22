@@ -27,10 +27,9 @@ Scheduler options are not graph inputs. The helper lifts every
 ``pw.metadata.options``/``dos.metadata.options``/``projwfc.metadata.options``
 section into the ``runtime_config`` launch mapping as a strictly nested mapping,
 and merges the ``options`` keyword into every placement. Each authored subgraph
-callee alias adds one level (for example ``{'scf': {'pw_calc': ..., 'pw_calc_monitored': ...},
-'bands': {...}}`` for the bands root); the ``CalcJob`` placement alias holds
-the process input mapping (with a ``metadata`` key) at the leaf. Every ``pw`` scope carries both static placements
-(``pw_calc`` unmonitored plus ``pw_calc_monitored``) with identical scheduler options. Branch and loop control frames are
+callee alias adds one level (for example ``{'scf': {'pw_calc': ...},
+'bands': {...}}`` for the bands root); the ``CalcJob`` placement holds
+the process input mapping (with a ``metadata`` key) at the leaf. Branch and loop control frames are
 transparent, and loop iterations reuse their placement's configuration, so no
 generated suffixes or per-iteration keys appear. The protocol supplies
 scheduler options for every ``CalcJob`` placement. Unknown paths and
@@ -695,49 +694,22 @@ def _placement_metadata(section_options: dict, global_options: dict | None, code
 
 
 def _pw_scope_metadata(section_options: dict, global_options: dict | None, code: orm.Code | None) -> dict:
-    """Return the scheduler metadata for one ``pw`` scope with both static placements in sync.
-
-    The native ``pw_base_graph`` branches over a plain ``pw_calc`` placement (no monitor
-    inputs) and a monitored ``pw_calc_monitored`` placement (static ``monitors.stuck``).
-    Core validates every reachable ``CalcJob`` leaf, so both placements need a leaf each
-    carrying the same scheduler options; the monitor branch never changes the wallclock.
-    """
-    metadata = _placement_metadata(section_options, global_options, code)
-    return {'pw_calc': metadata, 'pw_calc_monitored': copy.deepcopy(metadata)}
+    """Return the scheduler metadata for the single PW placement."""
+    return {'pw_calc': _placement_metadata(section_options, global_options, code)}
 
 
-def _duplicate_pw_leaves(node: t.Any, _path: str = 'runtime_config') -> t.Any:
-    """Duplicate a single-sided ``pw_calc``/``pw_calc_monitored`` override onto its sibling.
-
-    Explicit ``runtime_config`` overrides name one leaf per scope; without duplication the
-    sibling would keep the protocol default and the two placements would desynchronize.
-    Scopes stay independent: only leaves under the same parent are synchronized.
-
-    Both leaves present with different mappings is an actionable error: the placements
-    are mutually exclusive representations of the same run and must carry identical
-    scheduler options, so silently keeping divergent leaves would drop one explicit
-    override. Pass a single-sided override (it is duplicated onto its sibling) or
-    repeat the same mapping on both leaves.
-    """
+def _normalize_pw_leaves(node: t.Any, path: str = 'runtime_config') -> t.Any:
+    """Translate old monitored placement keys in QE protocol overrides."""
     if not isinstance(node, dict):
         return node
-    duplicated = {key: _duplicate_pw_leaves(value, f'{_path}.{key}') for key, value in node.items()}
-    has_plain = 'pw_calc' in duplicated
-    has_monitored = 'pw_calc_monitored' in duplicated
-    if has_plain and has_monitored:
-        if duplicated['pw_calc'] != duplicated['pw_calc_monitored']:
-            msg = (
-                f'`{_path}` holds conflicting `pw_calc` and `pw_calc_monitored` metadata: the two '
-                'placements are mutually exclusive representations of the same run and must carry '
-                'identical scheduler options. Pass a single-sided override (it is duplicated onto '
-                'its sibling) or repeat the same mapping on both leaves.'
-            )
+    scope = {key: _normalize_pw_leaves(value, f'{path}.{key}') for key, value in node.items()}
+    if 'pw_calc_monitored' in scope:
+        legacy = scope.pop('pw_calc_monitored')
+        if 'pw_calc' in scope and scope['pw_calc'] != legacy:
+            msg = f'`{path}` holds conflicting `pw_calc` and `pw_calc_monitored` overrides.'
             raise ValueError(msg)
-    elif has_plain ^ has_monitored:
-        source = duplicated['pw_calc'] if has_plain else duplicated['pw_calc_monitored']
-        target = 'pw_calc_monitored' if has_plain else 'pw_calc'
-        duplicated[target] = copy.deepcopy(source)
-    return duplicated
+        scope['pw_calc'] = legacy
+    return scope
 
 
 def _placement_options(runtime_config: dict | None, *path: str) -> dict:
@@ -1195,11 +1167,7 @@ def _resolve_sections(
 def _merge_runtime_config(*mappings: dict | None) -> dict:
     """Merge placement metadata mappings left to right, with the rightmost winning.
 
-    Single-sided ``pw_calc``/``pw_calc_monitored`` overrides are duplicated onto
-    their sibling before merging, so the two static placements stay synchronized
-    while independent scopes resolve independently. Conflicting sibling leaves in
-    any single mapping fail fast instead of desynchronizing the placements, and
-    the merged result is rechecked so a conflict can never slip through.
+    Legacy monitored placement keys are normalized before merging.
     """
     merged: dict[str, dict] = {}
     for mapping in mappings:
@@ -1208,13 +1176,12 @@ def _merge_runtime_config(*mappings: dict | None) -> dict:
         if not isinstance(mapping, dict):
             msg = '`runtime_config` must be a mapping of authored placement names.'
             raise ValueError(msg)
-        mapping = _duplicate_pw_leaves(mapping)
+        mapping = _normalize_pw_leaves(mapping)
         for placement, metadata in mapping.items():
             if not isinstance(metadata, dict):
                 msg = f'`runtime_config.{placement}` must be a mapping.'
                 raise ValueError(msg)
             merged[placement] = _recursive_merge(merged.get(placement, {}), copy.deepcopy(metadata))
-    _duplicate_pw_leaves(merged)
     return merged
 
 
