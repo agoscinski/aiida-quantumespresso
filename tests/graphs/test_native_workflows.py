@@ -236,9 +236,9 @@ def _patch_nested(monkeypatch, pw_stub=None, dos_stub=None, projwfc_stub=None) -
     if pw_stub is not None:
         monkeypatch.setattr(base_module, 'pw_calc', task(pw_stub, inputs={'monitors': {'stuck': Dict}}, errors=PwErrors))
     if dos_stub is not None:
-        monkeypatch.setattr(pdos_module, 'dos_calc', task(dos_stub))
+        monkeypatch.setattr(pdos_module, 'dos_calc', task(dos_stub, errors=pdos_module.DosErrors))
     if projwfc_stub is not None:
-        monkeypatch.setattr(pdos_module, 'projwfc_calc', task(projwfc_stub))
+        monkeypatch.setattr(pdos_module, 'projwfc_calc', task(projwfc_stub, errors=pdos_module.ProjwfcErrors))
     for handle in (
         base_module.pw_base_graph,
         pw_module.pw_relax_graph,

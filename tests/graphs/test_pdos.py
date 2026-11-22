@@ -21,8 +21,6 @@ real NSCF-to-report wiring, window matching, and serial ordering execute.
 ``@task`` collaborators run for real through ``run_get_node`` (all local).
 """
 
-import typing as t
-
 import aiida.engine
 import numpy as np
 import pytest
@@ -31,7 +29,7 @@ if not hasattr(aiida.engine, 'graph'):
     pytest.skip('Experimental graphs require the pinned aiida-core 3.x fork', allow_module_level=True)
 
 from aiida.common.links import LinkType
-from aiida.engine import PortModel, run_get_node, task
+from aiida.engine import Err, Ok, PortModel, RestartErrors, Result, run_get_node, task
 from aiida.orm import (
     BandsData,
     Code,
@@ -56,7 +54,6 @@ from aiida_quantumespresso.workflows.graphs.pdos import (
     pdos_from_scratch_serial,
     pdos_stage_parallel,
     pdos_stage_serial,
-    require_pdos_base,
     require_scf_parameters,
     resolve_nscf_parameters,
     resolve_post_windows,
@@ -136,21 +133,26 @@ def _stub_remote(path: str) -> RemoteData:
     return RemoteData(computer=_stub_computer(), remote_path=path)
 
 
-class StubPwOutputs(t.TypedDict):
+class StubPwOutputs(PortModel):
     """Fabricated base-run products of the ``pw_base_graph`` stub."""
 
     output_parameters: Dict
     output_band: BandsData
+    output_structure: StructureData | None = None
+    output_trajectory: BandsData | None = None
+    output_kpoints: KpointsData | None = None
+    output_atomic_occupations: Dict | None = None
     remote_folder: RemoteData
     report: Dict
 
 
-class StubDosOutputs(t.TypedDict):
+class StubDosOutputs(PortModel):
     """Fabricated post-processing products of the ``dos.x`` stub."""
 
     output_parameters: Dict
     output_dos: XyData
     remote_folder: RemoteData
+    error: pdos_module.DosErrors | None = None
 
 
 class StubProjwfcOutputs(PortModel):
@@ -167,6 +169,7 @@ class StubProjwfcOutputs(PortModel):
     bands_up: BandsData | None = None
     bands_down: BandsData | None = None
     remote_folder: RemoteData
+    error: pdos_module.ProjwfcErrors | None = None
 
 
 @task
@@ -180,23 +183,32 @@ def pw_base_graph(
     kpoints_distance: Float | None = None,
     parent_folder: RemoteData | None = None,
     monitors: DataDict | None = None,
-) -> StubPwOutputs:
+) -> Result[StubPwOutputs, RestartErrors]:
     """Stand-in for ``pw_base_graph``: echo the band count, fabricate bands spanning the DOS window."""
     from aiida.orm import Float as OrmFloat  # noqa: F401  (keeps the stub import-local)
 
     del code, structure, pseudos, settings, kpoints, kpoints_distance, parent_folder, monitors
-    nbnd = int(parameters.get_dict().get('SYSTEM', {}).get('nbnd', 8))
+    params = parameters.get_dict()
+    if params.get('fail'):
+        return Err(RestartErrors.UNHANDLED_FAILURE)
+    nbnd = int(params.get('SYSTEM', {}).get('nbnd', 8))
     kpoints_node = KpointsData()
     kpoints_node.set_kpoints([(0.0, 0.0, 0.0), (0.5, 0.0, 0.0)])
     bands = BandsData()
     bands.set_kpointsdata(kpoints_node)
     bands.set_bands([[-5.0], [8.0]])
-    return {
-        'output_parameters': Dict({'number_of_bands': nbnd, 'number_of_electrons': 8, 'fermi_energy': 6.9}),
-        'output_band': bands,
-        'remote_folder': _stub_remote('/tmp/stub-pw'),
-        'report': Dict({'attempts': 1, 'status': 'finished'}),
-    }
+    return Ok(
+        {
+            'output_parameters': Dict({'number_of_bands': nbnd, 'number_of_electrons': 8, 'fermi_energy': 6.9}),
+            'output_band': bands,
+            'output_structure': None,
+            'output_trajectory': None,
+            'output_kpoints': None,
+            'output_atomic_occupations': None,
+            'remote_folder': _stub_remote('/tmp/stub-pw'),
+            'report': Dict({'attempts': 1, 'status': params.get('status', 'finished')}),
+        }
+    )
 
 
 @task
@@ -221,6 +233,9 @@ def dos_calc(
         'output_parameters': Dict({'emin': emin, 'emax': emax, 'deltae': block.get('deltae', 0.01)}),
         'output_dos': output_dos,
         'remote_folder': _stub_remote('/tmp/stub-dos'),
+        'error': pdos_module.DosErrors.ERROR_READING_DOS_FILE
+        if settings and settings.get_dict().get('declared')
+        else None,
     }
 
 
@@ -232,7 +247,7 @@ def projwfc_calc(
     settings: Dict | None = None,
 ) -> StubProjwfcOutputs:
     """Stand-in for the ``projwfc.x`` calculation: echo the resolved window as total DOS."""
-    del code, parent_folder, settings
+    del code, parent_folder
     params = parameters.get_dict()
     block = params.get('PROJWFC', {})
     emin, emax = float(block.get('emin', -5.0)), float(block.get('emax', 8.0))
@@ -243,6 +258,9 @@ def projwfc_calc(
         'output_parameters': Dict({'emin': emin, 'emax': emax, 'deltae': block.get('deltae', 0.01)}),
         'Dos': total_dos,
         'remote_folder': _stub_remote('/tmp/stub-projwfc'),
+        'error': pdos_module.ProjwfcErrors.ERROR_READING_PDOSTOT_FILE
+        if settings and settings.get_dict().get('declared')
+        else None,
     }
 
 
@@ -319,34 +337,6 @@ def _calcjob_paths(template) -> set:
     return found
 
 
-def test_post_placements_keep_runtime_config_names() -> None:
-    """The calculation placements keep their names so one nested scope entry covers every graph."""
-    from aiida.engine.processes.graphs.ir import ProcessTask, SubgraphTask
-    from aiida.engine.processes.graphs.lowering import compile_graph
-
-    def _process_tasks(template) -> list:
-        """Return every process task of a template, including nested bodies."""
-        found = []
-
-        def _visit(current) -> None:
-            if isinstance(current, ProcessTask):
-                found.append(current)
-            elif isinstance(current, SubgraphTask):
-                for nested in current.body.tasks:
-                    _visit(nested)
-
-        for current in template.tasks:
-            _visit(current)
-        return found
-
-    names = set()
-    for target in (pdos_stage_parallel, pdos_stage_serial, pdos_from_scratch_parallel, pdos_from_parent_parallel):
-        for placement in _process_tasks(compile_graph(target)):
-            if placement.spec.identifier in ('DosCalculation', 'ProjwfcCalculation'):
-                names.add(placement.name)
-    assert names == {'dos_calc', 'projwfc_calc'}
-
-
 def test_stage_scopes_follow_authored_aliases() -> None:
     """The compiled PDOS stages address NSCF/DOS/PROJWFC through authored aliases.
 
@@ -395,60 +385,49 @@ def test_roots_nest_stage_beside_scf_scope() -> None:
         assert _calcjob_paths(compile_graph(root)) == {(stage, *path) for path in expected_stage}
 
 
-def test_pdos_stage_post_processing_dependencies() -> None:
-    """The parallel stage forks and joins; the serial stage sweeps DOS before PROJWFC."""
+def test_pdos_stage_forks_after_window_resolution() -> None:
+    """The parallel stage can dispatch both post-processors after matching their windows."""
+    from aiida.engine.processes.graphs.ir import BranchControl
     from aiida.engine.processes.graphs.lowering import compile_graph
 
-    parallel = {(edge.source, edge.target) for edge in compile_graph(pdos_stage_parallel).dependencies}
-    assert ('dos_calc', 'projwfc_calc') not in parallel
-    assert ('projwfc_calc', 'dos_calc') not in parallel
-    for placement in ('dos_calc', 'projwfc_calc'):
-        assert ('resolve_post_windows', placement) in parallel
-        assert (placement, 'sweep_stage') in parallel
-    assert ('sweep_stage', 'summarize_pdos') in parallel
+    def find_post_region(template):
+        if 'dos_calc' in template.task_names:
+            return template
+        for placement in template.tasks:
+            if isinstance(placement, BranchControl):
+                for body in placement.branches:
+                    found = find_post_region(body)
+                    if found is not None:
+                        return found
+        return None
 
-    serial = {(edge.source, edge.target) for edge in compile_graph(pdos_stage_serial).dependencies}
-    assert ('dos_calc', 'sweep_remote') in serial
-    assert ('sweep_remote', 'projwfc_calc') in serial
+    region = find_post_region(compile_graph(pdos_stage_parallel))
+    assert region is not None
+    edges = {(edge.source, edge.target) for edge in region.dependencies}
+    assert ('dos_calc', 'projwfc_calc') not in edges
+    assert ('projwfc_calc', 'dos_calc') not in edges
+    for name in ('dos_calc', 'projwfc_calc'):
+        assert ('resolve_post_windows', name) in edges
 
 
-@pytest.mark.parametrize('stage', ['scf', 'nscf'])
+@pytest.mark.parametrize('stage, expected', [('scf', 401), ('nscf', 402)])
 @pytest.mark.parametrize(
-    'status',
-    ['finished_ionic_convergence_reached_except_final_scf', 'finished_electronic_convergence_warning'],
+    'failure',
+    ['declared', 'finished_ionic_convergence_reached_except_final_scf', 'finished_electronic_convergence_warning'],
 )
-def test_require_pdos_base_rejects_considered_finished(stage, status) -> None:
-    """A considered-finished ``501``/``710`` report fails the PDOS guard, mirroring ``is_finished_ok``."""
-    with pytest.raises(ValueError, match=f'The {stage} base run.*pdos graph requires'):
-        run_get_node(require_pdos_base, report=Dict({'attempts': 1, 'status': status}), stage=stage)
+def test_pw_failures_map_to_stage(monkeypatch, aiida_code_installed, stage, expected, failure) -> None:
+    """Translate declared failures and non-converged PW reports at the root."""
+    _substitute_all(monkeypatch)
+    inputs = _scratch_inputs(*_codes(aiida_code_installed, 'pw-failure'))
+    parameters = inputs[f'{stage}_parameters'].get_dict()
+    parameters.update({'fail': failure == 'declared', 'status': failure})
+    inputs[f'{stage}_parameters'] = Dict(parameters)
 
+    outputs, node = run_get_node(pdos_from_scratch_parallel, **inputs)
 
-@pytest.mark.parametrize('stage', ['scf', 'nscf'])
-def test_require_pdos_base_finished(stage) -> None:
-    """A fully converged base report passes the PDOS guard."""
-    _, node = run_get_node(require_pdos_base, report=Dict({'attempts': 1, 'status': 'finished'}), stage=stage)
-    assert node.is_finished_ok
-
-
-def test_stage_guards_nscf_before_window() -> None:
-    """Both stages order the NSCF guard before the window extraction, blocking DOS/PROJWFC on failure."""
-    from aiida.engine.processes.graphs.lowering import compile_graph
-
-    for target in (pdos_stage_parallel, pdos_stage_serial):
-        names = compile_graph(target).task_names
-        assert names.index('require_pdos_base') < names.index('extract_nscf_window')
-
-
-def test_roots_guard_scf_before_stage() -> None:
-    """Both from-scratch roots order the SCF guard before the stage, blocking NSCF dispatch on failure."""
-    from aiida.engine.processes.graphs.lowering import compile_graph
-
-    for root, stage in (
-        (pdos_from_scratch_parallel, 'pdos_stage_parallel'),
-        (pdos_from_scratch_serial, 'pdos_stage_serial'),
-    ):
-        names = compile_graph(root).task_names
-        assert names.index('require_pdos_base') < names.index(stage)
+    assert node.exit_status == expected
+    assert 'report' not in outputs
+    assert {'dos_calc', 'projwfc_calc'}.isdisjoint(child.process_label for child in node.called_descendants)
 
 
 def test_require_scf_parameters() -> None:
@@ -770,6 +749,40 @@ def test_parallel_dos_failure_waits_for_projwfc_and_skips_continuation(monkeypat
     assert children['dos_calc'].is_excepted
     assert children['projwfc_calc'].is_finished_ok
     assert {'sweep_stage', 'summarize_pdos'}.isdisjoint(children)
+
+
+@pytest.mark.parametrize('dos, projwfc, expected', [(True, False, 403), (False, True, 404), (True, True, 404)])
+def test_parallel_declared_post_failures_map_to_stage(
+    monkeypatch, aiida_code_installed, dos, projwfc, expected
+) -> None:
+    """Both post-processors settle before the root decides which failure to report."""
+    _substitute_all(monkeypatch)
+    inputs = _scratch_inputs(*_codes(aiida_code_installed, 'post-failure'))
+    inputs['dos_settings'] = Dict({'declared': dos})
+    inputs['projwfc_settings'] = Dict({'declared': projwfc})
+
+    outputs, node = run_get_node(pdos_from_scratch_parallel, **inputs)
+
+    assert node.exit_status == expected
+    assert 'report' not in outputs
+    children = {child.process_label for child in node.called_descendants}
+    assert {'dos_calc', 'projwfc_calc'} <= children
+    assert {'sweep_stage', 'summarize_pdos'}.isdisjoint(children)
+
+
+def test_serial_dos_failure_does_not_start_projwfc(monkeypatch, aiida_code_installed) -> None:
+    """The serial stage checks the declared DOS failure before it sweeps or dispatches PROJWFC."""
+    _substitute_all(monkeypatch)
+    inputs = _scratch_inputs(*_codes(aiida_code_installed, 'serial-dos-failure'))
+    inputs['dos_settings'] = Dict({'declared': True})
+
+    outputs, node = run_get_node(pdos_from_scratch_serial, **inputs)
+
+    assert node.exit_status == 403
+    assert 'report' not in outputs
+    children = {child.process_label for child in node.called_descendants}
+    assert 'dos_calc' in children
+    assert {'projwfc_calc', 'sweep_remote', 'sweep_stage', 'summarize_pdos'}.isdisjoint(children)
 
 
 def test_production_from_scratch_serial(monkeypatch, aiida_code_installed) -> None:

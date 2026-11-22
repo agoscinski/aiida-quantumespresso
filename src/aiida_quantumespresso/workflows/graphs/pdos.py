@@ -40,24 +40,12 @@ strictly nested mapping, not through graph inputs. Each authored subgraph
 callee alias adds one level; the ``CalcJob`` placement alias holds the normal
 process input mapping (with a ``metadata`` key) at the leaf. The stage scopes nest the ``nscf`` base alias
 plus the ``dos_calc``/``projwfc_calc`` placements; a from-scratch root nests
-the ``scf`` base scope beside its stage scope. Each ``pw`` scope carries both
-static placements (``pw_calc`` unmonitored plus ``pw_calc_monitored``) with
-identical scheduler options::
+the ``scf`` base scope beside its stage scope. For example::
 
     runtime_config = {
+        'scf': {'pw_calc': {'metadata': {'options': scf_options}}},
         'pdos_stage_serial': {
-            'nscf': {'pw_calc': {'metadata': {'options': nscf_options}},
-                     'pw_calc_monitored': {'metadata': {'options': nscf_options}}},
-            'dos_calc': {'metadata': {'options': dos_options}},
-            'projwfc_calc': {'metadata': {'options': projwfc_options}},
-        },
-    }
-    runtime_config = {
-        'scf': {'pw_calc': {'metadata': {'options': scf_options}},
-                'pw_calc_monitored': {'metadata': {'options': scf_options}}},
-        'pdos_stage_serial': {
-            'nscf': {'pw_calc': {'metadata': {'options': nscf_options}},
-                     'pw_calc_monitored': {'metadata': {'options': nscf_options}}},
+            'nscf': {'pw_calc': {'metadata': {'options': nscf_options}}},
             'dos_calc': {'metadata': {'options': dos_options}},
             'projwfc_calc': {'metadata': {'options': projwfc_options}},
         },
@@ -73,16 +61,11 @@ fail at launch; omitted leaves use process defaults where available.
 
 Honest limits of this rewrite (see ``reports/STATUS.md``):
 
-* PDOS outcome (implemented report statuses, not exact numeric root parity): both the SCF and the NSCF base runs must finish with report
-  status ``'finished'``. A considered-finished ``501``/``710`` outcome fails the
-  graph via :func:`require_pdos_base`, mirroring the legacy
-  ``inspect_scf``/``inspect_nscf`` ``is_finished_ok`` gates: the SCF guard
-  blocks NSCF dispatch in the from-scratch roots, and the NSCF guard blocks the
-  DOS/PROJWFC pair in both the serial and the parallel stages.
-* Graphs declare no exit codes: the legacy statuses (``401``-``404`` plus the
-  restart ``301``/``302``/``401``/``402``) collapse into the single graph ``400
-  ERROR_TASK_FAILED``. Stage attribution survives in the child exit statuses;
-  the summary ``report`` is only emitted on success.
+* Declared child failures map to legacy PDOS statuses: SCF 401, NSCF 402,
+  DOS 403, and PROJWFC (including both post-processors failing) 404. The SCF
+  and NSCF checks also reject considered-finished 501/710 reports with their
+  stage status. Exceptions and undeclared failures remain generic graph failures.
+  The summary ``report`` is only emitted on success.
 * Input validators moved into ``@task`` bodies and now surface as task failures,
   not launch-time ``ValidationError``s. The equality of ``emin``/``emax``/
   ``deltae`` across DOS and PROJWFC is enforced by
@@ -99,14 +82,14 @@ Honest limits of this rewrite (see ``reports/STATUS.md``):
 import copy
 import typing as t
 
-from aiida.engine import dataflow, forward_outputs, graph, task
+from aiida.engine import Err, Ok, Result, dataflow, forward_outputs, graph, task
+from aiida.engine.processes.exit_code import ExitCode, ExitCodeEnum
 from aiida.orm import BandsData, Code, DataDict, Dict, Float, KpointsData, RemoteData, StructureData, XyData
 from aiida.orm.nodes.data.array.projection import ProjectionData
 
 from aiida_quantumespresso.calculations.dos import DosCalculation
 from aiida_quantumespresso.calculations.projwfc import ProjwfcCalculation
 from aiida_quantumespresso.workflows.graphs.base import pw_base_graph
-
 
 __all__ = (
     'MatchedParameters',
@@ -125,7 +108,6 @@ __all__ = (
     'pdos_stage',
     'pdos_stage_parallel',
     'pdos_stage_serial',
-    'require_pdos_base',
     'require_scf_parameters',
     'resolve_nscf_parameters',
     'resolve_post_windows',
@@ -134,8 +116,21 @@ __all__ = (
     'sweep_stage',
 )
 
-dos_calc = task(DosCalculation)
-projwfc_calc = task(ProjwfcCalculation)
+
+class PdosErrors(ExitCodeEnum):
+    """Legacy PDOS child-stage exit statuses."""
+
+    SCF = ExitCode(401, 'The SCF subprocess failed.')
+    NSCF = ExitCode(402, 'The NSCF subprocess failed.')
+    DOS = ExitCode(403, 'The DOS subprocess failed.')
+    PROJWFC = ExitCode(404, 'The PROJWFC subprocess failed.')
+
+
+DosErrors = ExitCodeEnum('DosErrors', dict(DosCalculation.spec().exit_codes))
+ProjwfcErrors = ExitCodeEnum('ProjwfcErrors', dict(ProjwfcCalculation.spec().exit_codes))
+
+dos_calc = task(DosCalculation, errors=DosErrors)
+projwfc_calc = task(ProjwfcCalculation, errors=ProjwfcErrors)
 
 
 class PdosWindow(t.TypedDict):
@@ -184,26 +179,9 @@ class PdosFromParentOutputs(PdosStageOutputs):
 
 
 @task
-def require_pdos_base(report: Dict, stage: str) -> None:
-    """Fail when a base run the PDOS graph depends on did not fully converge.
-
-    Mirrors ``PdosWorkChain.inspect_scf``/``inspect_nscf``: both require
-    ``is_finished_ok``, so a considered-finished ``501``
-    (``finished_ionic_convergence_reached_except_final_scf``) or ``710``
-    (``finished_electronic_convergence_warning``) outcome must fail the graph
-    instead of flowing into the NSCF dispatch or the DOS/PROJWFC pair. A local
-    guard (rather than reusing ``pw.require_base_finished``) keeps the error in
-    the PDOS domain instead of naming the bands graph.
-
-    :param report: the ``report`` of the base run.
-    :param stage: ``'scf'`` or ``'nscf'``, naming the failed stage.
-    :raises ValueError: if the report status is not ``'finished'``.
-    """
-    status = report.get_dict().get('status')
-    if status != 'finished':
-        msg = f"The {stage} base run finished with status '{status}'; the pdos graph requires a fully converged run."
-        raise ValueError(msg)
-    return None
+def pdos_base_finished(report: Dict | None) -> bool:
+    """Reject declared failures (no report) and non-converged PW runs."""
+    return report is not None and report.get_dict().get('status') == 'finished'
 
 
 @task
@@ -471,7 +449,7 @@ def pdos_stage_parallel(
     stages: int = 1,
     clean_workdir: bool = False,
     monitors: DataDict | None = None,
-) -> PdosStageOutputs:
+) -> Result[PdosStageOutputs, PdosErrors]:
     """Run NSCF, DOS, and PROJWFC without an intermediate remote sweep.
 
     The NSCF parameters resolve the band-count rule first; its bands window feeds both post-processing
@@ -505,18 +483,24 @@ def pdos_stage_parallel(
         parent_parameters=parent_output_parameters,
         nbands_factor=nbands_factor,
     )
-    nscf_run = pw_base_graph(
-        code=pw_code,
-        structure=structure,
-        pseudos=pseudos,
-        parameters=resolved_nscf_parameters,
-        settings=nscf_settings,
-        kpoints=nscf_kpoints,
-        kpoints_distance=nscf_kpoints_distance,
-        parent_folder=parent_folder,
-        monitors=monitors,
-    ).alias('nscf')
-    nscf_checked = require_pdos_base(report=nscf_run.report, stage='nscf')  # noqa: F841 - enforce validation or cleanup in source order
+    nscf_run, _ = (
+        pw_base_graph(
+            code=pw_code,
+            structure=structure,
+            pseudos=pseudos,
+            parameters=resolved_nscf_parameters,
+            settings=nscf_settings,
+            kpoints=nscf_kpoints,
+            kpoints_distance=nscf_kpoints_distance,
+            parent_folder=parent_folder,
+            monitors=monitors,
+        )
+        .alias('nscf')
+        .catch()
+    )
+    nscf_finished = pdos_base_finished(report=nscf_run.report)
+    if not nscf_finished:
+        return Err(PdosErrors.NSCF)
     window = extract_nscf_window(
         output_parameters=nscf_run.output_parameters,
         output_band=nscf_run.output_band,
@@ -542,6 +526,11 @@ def pdos_stage_parallel(
             parameters=matched.projwfc,
             parent_folder=nscf_run.remote_folder,
         )
+    # Legacy uses 404 for both failures as well as for PROJWFC alone.
+    if projwfc_run.error is not None:
+        return Err(PdosErrors.PROJWFC)
+    if dos_run.error is not None:
+        return Err(PdosErrors.DOS)
     swept = sweep_stage(  # noqa: F841
         nscf_folder=nscf_run.remote_folder,
         dos_folder=dos_run.remote_folder,
@@ -555,27 +544,37 @@ def pdos_stage_parallel(
         stages=stages,
         mode='parallel',
     )
-    return {
-        'nscf': forward_outputs(nscf_run, exclude=('report',)),
-        'dos': dos_run,
-        'projwfc': projwfc_run,
-        'nscf_remote_folder': nscf_run.remote_folder,
-        'nscf_output_parameters': nscf_run.output_parameters,
-        'nscf_output_band': nscf_run.output_band,
-        'dos_output_parameters': dos_run.output_parameters,
-        'dos_output_dos': dos_run.output_dos,
-        'projwfc_output_parameters': projwfc_run.output_parameters,
-        'projwfc_dos': projwfc_run.Dos,
-        'projwfc_ldos': projwfc_run.Ldos,
-        'projwfc_pdos': projwfc_run.Pdos,
-        'projwfc_projections': projwfc_run.projections,
-        'projwfc_projections_up': projwfc_run.projections_up,
-        'projwfc_projections_down': projwfc_run.projections_down,
-        'projwfc_bands': projwfc_run.bands,
-        'projwfc_bands_up': projwfc_run.bands_up,
-        'projwfc_bands_down': projwfc_run.bands_down,
-        'report': report,
-    }
+    return Ok(
+        {
+            'nscf': {
+                'output_parameters': nscf_run.output_parameters,
+                'output_structure': nscf_run.output_structure,
+                'output_band': nscf_run.output_band,
+                'output_trajectory': nscf_run.output_trajectory,
+                'output_kpoints': nscf_run.output_kpoints,
+                'output_atomic_occupations': nscf_run.output_atomic_occupations,
+                'remote_folder': nscf_run.remote_folder,
+            },
+            'dos': forward_outputs(dos_run, exclude=('error',)),
+            'projwfc': forward_outputs(projwfc_run, exclude=('error',)),
+            'nscf_remote_folder': nscf_run.remote_folder,
+            'nscf_output_parameters': nscf_run.output_parameters,
+            'nscf_output_band': nscf_run.output_band,
+            'dos_output_parameters': dos_run.output_parameters,
+            'dos_output_dos': dos_run.output_dos,
+            'projwfc_output_parameters': projwfc_run.output_parameters,
+            'projwfc_dos': projwfc_run.Dos,
+            'projwfc_ldos': projwfc_run.Ldos,
+            'projwfc_pdos': projwfc_run.Pdos,
+            'projwfc_projections': projwfc_run.projections,
+            'projwfc_projections_up': projwfc_run.projections_up,
+            'projwfc_projections_down': projwfc_run.projections_down,
+            'projwfc_bands': projwfc_run.bands,
+            'projwfc_bands_up': projwfc_run.bands_up,
+            'projwfc_bands_down': projwfc_run.bands_down,
+            'report': report,
+        }
+    )
 
 
 @graph
@@ -600,7 +599,7 @@ def pdos_stage_serial(
     stages: int = 1,
     clean_workdir: bool = False,
     monitors: DataDict | None = None,
-) -> PdosStageOutputs:
+) -> Result[PdosStageOutputs, PdosErrors]:
     """Run NSCF then DOS, sweep DOS, then PROJWFC from one parent folder, then report.
 
     Source order matches the legacy ``serial_clean`` order DOS → cleanup → PROJWFC.
@@ -634,18 +633,24 @@ def pdos_stage_serial(
         parent_parameters=parent_output_parameters,
         nbands_factor=nbands_factor,
     )
-    nscf_run = pw_base_graph(
-        code=pw_code,
-        structure=structure,
-        pseudos=pseudos,
-        parameters=resolved_nscf_parameters,
-        settings=nscf_settings,
-        kpoints=nscf_kpoints,
-        kpoints_distance=nscf_kpoints_distance,
-        parent_folder=parent_folder,
-        monitors=monitors,
-    ).alias('nscf')
-    nscf_checked = require_pdos_base(report=nscf_run.report, stage='nscf')  # noqa: F841 - enforce validation or cleanup in source order
+    nscf_run, _ = (
+        pw_base_graph(
+            code=pw_code,
+            structure=structure,
+            pseudos=pseudos,
+            parameters=resolved_nscf_parameters,
+            settings=nscf_settings,
+            kpoints=nscf_kpoints,
+            kpoints_distance=nscf_kpoints_distance,
+            parent_folder=parent_folder,
+            monitors=monitors,
+        )
+        .alias('nscf')
+        .catch()
+    )
+    nscf_finished = pdos_base_finished(report=nscf_run.report)
+    if not nscf_finished:
+        return Err(PdosErrors.NSCF)
     window = extract_nscf_window(
         output_parameters=nscf_run.output_parameters,
         output_band=nscf_run.output_band,
@@ -664,6 +669,8 @@ def pdos_stage_serial(
         parameters=matched.dos,
         parent_folder=nscf_run.remote_folder,
     )
+    if dos_run.error is not None:
+        return Err(PdosErrors.DOS)
     dos_swept = sweep_remote(folder=dos_run.remote_folder, enabled=True)  # noqa: F841 - enforce validation or cleanup in source order
     projwfc_run = projwfc_calc(
         code=projwfc_code,
@@ -671,6 +678,8 @@ def pdos_stage_serial(
         parameters=matched.projwfc,
         parent_folder=nscf_run.remote_folder,
     )
+    if projwfc_run.error is not None:
+        return Err(PdosErrors.PROJWFC)
     projwfc_swept = sweep_remote(folder=projwfc_run.remote_folder, enabled=True).alias('projwfc_swept')  # noqa: F841 - enforce validation or cleanup in source order
     swept = sweep_stage(  # noqa: F841
         nscf_folder=nscf_run.remote_folder,
@@ -685,27 +694,37 @@ def pdos_stage_serial(
         stages=stages,
         mode='serial',
     )
-    return {
-        'nscf': forward_outputs(nscf_run, exclude=('report',)),
-        'dos': dos_run,
-        'projwfc': projwfc_run,
-        'nscf_remote_folder': nscf_run.remote_folder,
-        'nscf_output_parameters': nscf_run.output_parameters,
-        'nscf_output_band': nscf_run.output_band,
-        'dos_output_parameters': dos_run.output_parameters,
-        'dos_output_dos': dos_run.output_dos,
-        'projwfc_output_parameters': projwfc_run.output_parameters,
-        'projwfc_dos': projwfc_run.Dos,
-        'projwfc_ldos': projwfc_run.Ldos,
-        'projwfc_pdos': projwfc_run.Pdos,
-        'projwfc_projections': projwfc_run.projections,
-        'projwfc_projections_up': projwfc_run.projections_up,
-        'projwfc_projections_down': projwfc_run.projections_down,
-        'projwfc_bands': projwfc_run.bands,
-        'projwfc_bands_up': projwfc_run.bands_up,
-        'projwfc_bands_down': projwfc_run.bands_down,
-        'report': report,
-    }
+    return Ok(
+        {
+            'nscf': {
+                'output_parameters': nscf_run.output_parameters,
+                'output_structure': nscf_run.output_structure,
+                'output_band': nscf_run.output_band,
+                'output_trajectory': nscf_run.output_trajectory,
+                'output_kpoints': nscf_run.output_kpoints,
+                'output_atomic_occupations': nscf_run.output_atomic_occupations,
+                'remote_folder': nscf_run.remote_folder,
+            },
+            'dos': forward_outputs(dos_run, exclude=('error',)),
+            'projwfc': forward_outputs(projwfc_run, exclude=('error',)),
+            'nscf_remote_folder': nscf_run.remote_folder,
+            'nscf_output_parameters': nscf_run.output_parameters,
+            'nscf_output_band': nscf_run.output_band,
+            'dos_output_parameters': dos_run.output_parameters,
+            'dos_output_dos': dos_run.output_dos,
+            'projwfc_output_parameters': projwfc_run.output_parameters,
+            'projwfc_dos': projwfc_run.Dos,
+            'projwfc_ldos': projwfc_run.Ldos,
+            'projwfc_pdos': projwfc_run.Pdos,
+            'projwfc_projections': projwfc_run.projections,
+            'projwfc_projections_up': projwfc_run.projections_up,
+            'projwfc_projections_down': projwfc_run.projections_down,
+            'projwfc_bands': projwfc_run.bands,
+            'projwfc_bands_up': projwfc_run.bands_up,
+            'projwfc_bands_down': projwfc_run.bands_down,
+            'report': report,
+        }
+    )
 
 
 # Backwards-compatible aliases: the unqualified stage ran the parallel shape.
@@ -737,7 +756,7 @@ def pdos_from_scratch_parallel(
     monitors: DataDict | None = None,
     scf_monitors: DataDict | None = None,
     nscf_monitors: DataDict | None = None,
-) -> PdosFromScratchOutputs:
+) -> Result[PdosFromScratchOutputs, PdosErrors]:
     """Compute total and partial densities of states without intermediate cleanup.
 
     The SCF base run feeds its remote folder and band count into the shared
@@ -771,17 +790,23 @@ def pdos_from_scratch_parallel(
     :return: the SCF products, the stage products, and the summary report.
     """
     checked_scf_parameters = require_scf_parameters(parameters=scf_parameters)
-    scf_run = pw_base_graph(
-        code=pw_code,
-        structure=structure,
-        pseudos=pseudos,
-        parameters=checked_scf_parameters,
-        settings=scf_settings,
-        kpoints=scf_kpoints,
-        kpoints_distance=scf_kpoints_distance,
-        monitors=scf_monitors if scf_monitors is not None else monitors,
-    ).alias('scf')
-    scf_checked = require_pdos_base(report=scf_run.report, stage='scf')  # noqa: F841 - enforce validation or cleanup in source order
+    scf_run, _ = (
+        pw_base_graph(
+            code=pw_code,
+            structure=structure,
+            pseudos=pseudos,
+            parameters=checked_scf_parameters,
+            settings=scf_settings,
+            kpoints=scf_kpoints,
+            kpoints_distance=scf_kpoints_distance,
+            monitors=scf_monitors if scf_monitors is not None else monitors,
+        )
+        .alias('scf')
+        .catch()
+    )
+    scf_finished = pdos_base_finished(report=scf_run.report)
+    if not scf_finished:
+        return Err(PdosErrors.SCF)
     stage = pdos_stage_parallel(
         structure=structure,
         parent_folder=scf_run.remote_folder,
@@ -805,31 +830,41 @@ def pdos_from_scratch_parallel(
         monitors=nscf_monitors if nscf_monitors is not None else monitors,
     )
     scf_final = sweep_remote(folder=scf_run.remote_folder, enabled=clean_workdir).alias('scf_final')  # noqa: F841
-    return {
-        'scf': forward_outputs(scf_run, exclude=('report',)),
-        'scf_remote_folder': scf_run.remote_folder,
-        'scf_output_parameters': scf_run.output_parameters,
-        'scf_output_band': scf_run.output_band,
-        'nscf': stage.nscf,
-        'dos': stage.dos,
-        'projwfc': stage.projwfc,
-        'nscf_remote_folder': stage.nscf_remote_folder,
-        'nscf_output_parameters': stage.nscf_output_parameters,
-        'nscf_output_band': stage.nscf_output_band,
-        'dos_output_parameters': stage.dos_output_parameters,
-        'dos_output_dos': stage.dos_output_dos,
-        'projwfc_output_parameters': stage.projwfc_output_parameters,
-        'projwfc_dos': stage.projwfc_dos,
-        'projwfc_ldos': stage.projwfc_ldos,
-        'projwfc_pdos': stage.projwfc_pdos,
-        'projwfc_projections': stage.projwfc_projections,
-        'projwfc_projections_up': stage.projwfc_projections_up,
-        'projwfc_projections_down': stage.projwfc_projections_down,
-        'projwfc_bands': stage.projwfc_bands,
-        'projwfc_bands_up': stage.projwfc_bands_up,
-        'projwfc_bands_down': stage.projwfc_bands_down,
-        'report': stage.report,
-    }
+    return Ok(
+        {
+            'scf': {
+                'output_parameters': scf_run.output_parameters,
+                'output_structure': scf_run.output_structure,
+                'output_band': scf_run.output_band,
+                'output_trajectory': scf_run.output_trajectory,
+                'output_kpoints': scf_run.output_kpoints,
+                'output_atomic_occupations': scf_run.output_atomic_occupations,
+                'remote_folder': scf_run.remote_folder,
+            },
+            'scf_remote_folder': scf_run.remote_folder,
+            'scf_output_parameters': scf_run.output_parameters,
+            'scf_output_band': scf_run.output_band,
+            'nscf': stage.nscf,
+            'dos': stage.dos,
+            'projwfc': stage.projwfc,
+            'nscf_remote_folder': stage.nscf_remote_folder,
+            'nscf_output_parameters': stage.nscf_output_parameters,
+            'nscf_output_band': stage.nscf_output_band,
+            'dos_output_parameters': stage.dos_output_parameters,
+            'dos_output_dos': stage.dos_output_dos,
+            'projwfc_output_parameters': stage.projwfc_output_parameters,
+            'projwfc_dos': stage.projwfc_dos,
+            'projwfc_ldos': stage.projwfc_ldos,
+            'projwfc_pdos': stage.projwfc_pdos,
+            'projwfc_projections': stage.projwfc_projections,
+            'projwfc_projections_up': stage.projwfc_projections_up,
+            'projwfc_projections_down': stage.projwfc_projections_down,
+            'projwfc_bands': stage.projwfc_bands,
+            'projwfc_bands_up': stage.projwfc_bands_up,
+            'projwfc_bands_down': stage.projwfc_bands_down,
+            'report': stage.report,
+        }
+    )
 
 
 @graph
@@ -857,7 +892,7 @@ def pdos_from_scratch_serial(
     monitors: DataDict | None = None,
     scf_monitors: DataDict | None = None,
     nscf_monitors: DataDict | None = None,
-) -> PdosFromScratchOutputs:
+) -> Result[PdosFromScratchOutputs, PdosErrors]:
     """Compute total and partial densities of states, running SCF first, DOS before PROJWFC.
 
     Mirrors the legacy ``serial_clean`` order: SCF → NSCF → DOS → sweep DOS →
@@ -891,17 +926,23 @@ def pdos_from_scratch_serial(
     :return: the SCF products, the stage products, and the summary report.
     """
     checked_scf_parameters = require_scf_parameters(parameters=scf_parameters)
-    scf_run = pw_base_graph(
-        code=pw_code,
-        structure=structure,
-        pseudos=pseudos,
-        parameters=checked_scf_parameters,
-        settings=scf_settings,
-        kpoints=scf_kpoints,
-        kpoints_distance=scf_kpoints_distance,
-        monitors=scf_monitors if scf_monitors is not None else monitors,
-    ).alias('scf')
-    scf_checked = require_pdos_base(report=scf_run.report, stage='scf')  # noqa: F841 - enforce validation or cleanup in source order
+    scf_run, _ = (
+        pw_base_graph(
+            code=pw_code,
+            structure=structure,
+            pseudos=pseudos,
+            parameters=checked_scf_parameters,
+            settings=scf_settings,
+            kpoints=scf_kpoints,
+            kpoints_distance=scf_kpoints_distance,
+            monitors=scf_monitors if scf_monitors is not None else monitors,
+        )
+        .alias('scf')
+        .catch()
+    )
+    scf_finished = pdos_base_finished(report=scf_run.report)
+    if not scf_finished:
+        return Err(PdosErrors.SCF)
     stage = pdos_stage_serial(
         structure=structure,
         parent_folder=scf_run.remote_folder,
@@ -926,31 +967,41 @@ def pdos_from_scratch_serial(
     )
     scf_swept = sweep_remote(folder=scf_run.remote_folder, enabled=True)  # noqa: F841 - enforce validation or cleanup in source order
     scf_final = sweep_remote(folder=scf_run.remote_folder, enabled=clean_workdir).alias('scf_final')  # noqa: F841
-    return {
-        'scf': forward_outputs(scf_run, exclude=('report',)),
-        'scf_remote_folder': scf_run.remote_folder,
-        'scf_output_parameters': scf_run.output_parameters,
-        'scf_output_band': scf_run.output_band,
-        'nscf': stage.nscf,
-        'dos': stage.dos,
-        'projwfc': stage.projwfc,
-        'nscf_remote_folder': stage.nscf_remote_folder,
-        'nscf_output_parameters': stage.nscf_output_parameters,
-        'nscf_output_band': stage.nscf_output_band,
-        'dos_output_parameters': stage.dos_output_parameters,
-        'dos_output_dos': stage.dos_output_dos,
-        'projwfc_output_parameters': stage.projwfc_output_parameters,
-        'projwfc_dos': stage.projwfc_dos,
-        'projwfc_ldos': stage.projwfc_ldos,
-        'projwfc_pdos': stage.projwfc_pdos,
-        'projwfc_projections': stage.projwfc_projections,
-        'projwfc_projections_up': stage.projwfc_projections_up,
-        'projwfc_projections_down': stage.projwfc_projections_down,
-        'projwfc_bands': stage.projwfc_bands,
-        'projwfc_bands_up': stage.projwfc_bands_up,
-        'projwfc_bands_down': stage.projwfc_bands_down,
-        'report': stage.report,
-    }
+    return Ok(
+        {
+            'scf': {
+                'output_parameters': scf_run.output_parameters,
+                'output_structure': scf_run.output_structure,
+                'output_band': scf_run.output_band,
+                'output_trajectory': scf_run.output_trajectory,
+                'output_kpoints': scf_run.output_kpoints,
+                'output_atomic_occupations': scf_run.output_atomic_occupations,
+                'remote_folder': scf_run.remote_folder,
+            },
+            'scf_remote_folder': scf_run.remote_folder,
+            'scf_output_parameters': scf_run.output_parameters,
+            'scf_output_band': scf_run.output_band,
+            'nscf': stage.nscf,
+            'dos': stage.dos,
+            'projwfc': stage.projwfc,
+            'nscf_remote_folder': stage.nscf_remote_folder,
+            'nscf_output_parameters': stage.nscf_output_parameters,
+            'nscf_output_band': stage.nscf_output_band,
+            'dos_output_parameters': stage.dos_output_parameters,
+            'dos_output_dos': stage.dos_output_dos,
+            'projwfc_output_parameters': stage.projwfc_output_parameters,
+            'projwfc_dos': stage.projwfc_dos,
+            'projwfc_ldos': stage.projwfc_ldos,
+            'projwfc_pdos': stage.projwfc_pdos,
+            'projwfc_projections': stage.projwfc_projections,
+            'projwfc_projections_up': stage.projwfc_projections_up,
+            'projwfc_projections_down': stage.projwfc_projections_down,
+            'projwfc_bands': stage.projwfc_bands,
+            'projwfc_bands_up': stage.projwfc_bands_up,
+            'projwfc_bands_down': stage.projwfc_bands_down,
+            'report': stage.report,
+        }
+    )
 
 
 # Backwards-compatible alias: the unqualified from-scratch root ran the parallel shape.
@@ -978,7 +1029,7 @@ def pdos_from_parent_parallel(
     nbands_factor: float | None = None,
     clean_workdir: bool = False,
     monitors: DataDict | None = None,
-) -> PdosFromParentOutputs:
+) -> Result[PdosFromParentOutputs, PdosErrors]:
     """Compute total and partial densities of states from a caller-provided folder.
 
     Mirrors the legacy chain without the ``scf`` inputs: the caller hands over
@@ -1029,27 +1080,29 @@ def pdos_from_parent_parallel(
         clean_workdir=clean_workdir,
         monitors=monitors,
     )
-    return {
-        'nscf': stage.nscf,
-        'dos': stage.dos,
-        'projwfc': stage.projwfc,
-        'nscf_remote_folder': stage.nscf_remote_folder,
-        'nscf_output_parameters': stage.nscf_output_parameters,
-        'nscf_output_band': stage.nscf_output_band,
-        'dos_output_parameters': stage.dos_output_parameters,
-        'dos_output_dos': stage.dos_output_dos,
-        'projwfc_output_parameters': stage.projwfc_output_parameters,
-        'projwfc_dos': stage.projwfc_dos,
-        'projwfc_ldos': stage.projwfc_ldos,
-        'projwfc_pdos': stage.projwfc_pdos,
-        'projwfc_projections': stage.projwfc_projections,
-        'projwfc_projections_up': stage.projwfc_projections_up,
-        'projwfc_projections_down': stage.projwfc_projections_down,
-        'projwfc_bands': stage.projwfc_bands,
-        'projwfc_bands_up': stage.projwfc_bands_up,
-        'projwfc_bands_down': stage.projwfc_bands_down,
-        'report': stage.report,
-    }
+    return Ok(
+        {
+            'nscf': stage.nscf,
+            'dos': stage.dos,
+            'projwfc': stage.projwfc,
+            'nscf_remote_folder': stage.nscf_remote_folder,
+            'nscf_output_parameters': stage.nscf_output_parameters,
+            'nscf_output_band': stage.nscf_output_band,
+            'dos_output_parameters': stage.dos_output_parameters,
+            'dos_output_dos': stage.dos_output_dos,
+            'projwfc_output_parameters': stage.projwfc_output_parameters,
+            'projwfc_dos': stage.projwfc_dos,
+            'projwfc_ldos': stage.projwfc_ldos,
+            'projwfc_pdos': stage.projwfc_pdos,
+            'projwfc_projections': stage.projwfc_projections,
+            'projwfc_projections_up': stage.projwfc_projections_up,
+            'projwfc_projections_down': stage.projwfc_projections_down,
+            'projwfc_bands': stage.projwfc_bands,
+            'projwfc_bands_up': stage.projwfc_bands_up,
+            'projwfc_bands_down': stage.projwfc_bands_down,
+            'report': stage.report,
+        }
+    )
 
 
 @graph
@@ -1073,7 +1126,7 @@ def pdos_from_parent_serial(
     nbands_factor: float | None = None,
     clean_workdir: bool = False,
     monitors: DataDict | None = None,
-) -> PdosFromParentOutputs:
+) -> Result[PdosFromParentOutputs, PdosErrors]:
     """Compute total and partial densities of states from a caller-provided folder, DOS before PROJWFC.
 
     The serial stage orders DOS → sweep → PROJWFC with an unconditional
@@ -1122,27 +1175,29 @@ def pdos_from_parent_serial(
         clean_workdir=clean_workdir,
         monitors=monitors,
     )
-    return {
-        'nscf': stage.nscf,
-        'dos': stage.dos,
-        'projwfc': stage.projwfc,
-        'nscf_remote_folder': stage.nscf_remote_folder,
-        'nscf_output_parameters': stage.nscf_output_parameters,
-        'nscf_output_band': stage.nscf_output_band,
-        'dos_output_parameters': stage.dos_output_parameters,
-        'dos_output_dos': stage.dos_output_dos,
-        'projwfc_output_parameters': stage.projwfc_output_parameters,
-        'projwfc_dos': stage.projwfc_dos,
-        'projwfc_ldos': stage.projwfc_ldos,
-        'projwfc_pdos': stage.projwfc_pdos,
-        'projwfc_projections': stage.projwfc_projections,
-        'projwfc_projections_up': stage.projwfc_projections_up,
-        'projwfc_projections_down': stage.projwfc_projections_down,
-        'projwfc_bands': stage.projwfc_bands,
-        'projwfc_bands_up': stage.projwfc_bands_up,
-        'projwfc_bands_down': stage.projwfc_bands_down,
-        'report': stage.report,
-    }
+    return Ok(
+        {
+            'nscf': stage.nscf,
+            'dos': stage.dos,
+            'projwfc': stage.projwfc,
+            'nscf_remote_folder': stage.nscf_remote_folder,
+            'nscf_output_parameters': stage.nscf_output_parameters,
+            'nscf_output_band': stage.nscf_output_band,
+            'dos_output_parameters': stage.dos_output_parameters,
+            'dos_output_dos': stage.dos_output_dos,
+            'projwfc_output_parameters': stage.projwfc_output_parameters,
+            'projwfc_dos': stage.projwfc_dos,
+            'projwfc_ldos': stage.projwfc_ldos,
+            'projwfc_pdos': stage.projwfc_pdos,
+            'projwfc_projections': stage.projwfc_projections,
+            'projwfc_projections_up': stage.projwfc_projections_up,
+            'projwfc_projections_down': stage.projwfc_projections_down,
+            'projwfc_bands': stage.projwfc_bands,
+            'projwfc_bands_up': stage.projwfc_bands_up,
+            'projwfc_bands_down': stage.projwfc_bands_down,
+            'report': stage.report,
+        }
+    )
 
 
 # Backwards-compatible alias: the unqualified from-parent root ran the parallel shape.

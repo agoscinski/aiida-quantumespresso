@@ -25,9 +25,16 @@ print(preview)
 
 The preview shows placement addresses, resolved inputs such as codes and scheduler options, and deferred inputs such as the bands parent folder. Branch arms and loop bodies are shown as static regions, without predicting the selected branch or number of attempts. This is not a CalcJob dry run. `build()` without inputs still only validates the definition.
 
+### PW monitor placement
+
+The initial attempt and retries share one `pw_calc` address, with `monitors.stuck` omitted when absent. QE protocol helpers translate old `pw_calc_monitored` scheduler overrides and reject conflicting values. In direct graph launches, rename that key to `pw_calc`, and pass monitor definitions via the graph's `monitors` input rather than `runtime_config`.
+
+### PDOS stage exit codes
+
+Native PDOS maps declared child failures to the legacy stage statuses: SCF `401`, NSCF `402`, DOS `403`, and PROJWFC (or DOS and PROJWFC together) `404`. PDOS also maps considered-finished PW `501`/`710` reports to the corresponding stage failure. Other PW callers can still accept those reports and use the calculation outputs. Undeclared exceptions still receive the generic graph failure status.
+
 ## Still open
 
-- **PW monitors:** The initial attempt and retries share one `pw_calc` address, with `monitors.stuck` omitted when absent. QE protocol helpers translate old `pw_calc_monitored` scheduler overrides and reject conflicting values. In direct graph launches, rename that key to `pw_calc`, and pass monitor definitions via the graph's `monitors` input rather than `runtime_config`.
-- **Composite exit codes and output parity:** PW, PH, and NEB return declared statuses for terminal retry failures. PW 501/710 outcomes still expose usable outputs to callers that accept them. Composite stage-specific exit codes and exact legacy PDOS output parity remain open.
+- **Other composite exit codes and PDOS output parity:** This translation is specific to PDOS; PW bands and relax were not changed. Exact legacy PDOS output parity remains open.
 - **PH merge provenance:** Exact legacy merge provenance remains open.
 - **Process cancellation:** Cleanup already refuses to act on active descendants. The [child-cancellation issue](../../reports/process-kill-skips-children.md) is a separate process-engine bug.
