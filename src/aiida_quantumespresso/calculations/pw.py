@@ -100,6 +100,14 @@ class PwCalculation(BasePwCpInputGenerator):
         )
         spec.output('output_kpoints', valid_type=orm.KpointsData, required=False)
         spec.output('output_atomic_occupations', valid_type=orm.Dict, required=False)
+        spec.output(
+            'monitor_diagnostics',
+            valid_type=orm.Dict,
+            required=False,
+            help='Machine-readable diagnostic left by a structured monitor (see '
+            '`accuracy_stuck` with `structured=True`), holding e.g. a `reason` key. '
+            'Absent unless a monitor attached it.',
+        )
         spec.default_output_node = 'output_parameters'
 
         # Unrecoverable errors: required retrieved files could not be read, parsed or are otherwise incomplete

@@ -1,0 +1,59 @@
+name: graph
+
+on: [push, pull_request]
+
+concurrency:
+    group: graph-${{ github.ref }}
+    cancel-in-progress: true
+
+permissions:
+    contents: read
+
+env:
+    # Released core 2.8 has no graph API. Keep this integration revision exact.
+    CORE_REV: db31187a536da235c2359286717658b378f30ff3
+    CORE_REPO: agoscinski/aiida-core
+    AIIDA_WARN_v3: 1
+
+jobs:
+    graphs:
+        runs-on: ubuntu-latest
+        services:
+            postgres:
+                image: postgres:12
+            rabbitmq:
+                image: rabbitmq:latest
+                ports:
+                -   5672:5672
+        steps:
+        -   uses: actions/checkout@v4
+        -   uses: astral-sh/setup-uv@v6
+            with:
+                activate-environment: true
+                python-version: '3.12'
+        # Resolve QE's released dependencies first, then intentionally replace
+        # core with the experimental fork (outside QE's stable ~=2.8 bound).
+        -   name: Install QE and test dependencies
+            run: uv pip install -e '.[tests]' pytest-xdist
+        -   name: Install pinned experimental core
+            run: uv pip install 'aiida-core[atomic_tools] @ git+https://github.com/${{ env.CORE_REPO }}@${{ env.CORE_REV }}'
+        -   name: Verify core revision and graph API
+            run: |
+                uv run --no-project python - <<'EOF'
+                import json
+                import os
+                from importlib.metadata import distribution, version
+                from aiida.engine import GraphLaunchPreview, dataflow, graph, par_map, task
+
+                assert version('aiida-core').startswith('3.')
+                direct = json.loads(distribution('aiida-core').read_text('direct_url.json'))
+                assert direct['vcs_info']['commit_id'] == os.environ['CORE_REV'], direct
+                print('Testing graph API from', direct['vcs_info']['commit_id'])
+                EOF
+        -   name: Graph tests (must not skip)
+            run: |
+                uv run --no-project pytest tests/graphs -n 4 -v --strict-markers -o 'markers=presto: SQLite/ZeroMQ test'
+        # Run even when graph tests fail so compatibility regressions are visible.
+        -   name: Legacy workflow regression suite against experimental core
+            if: always()
+            run: uv run --no-project pytest tests/workflows -q

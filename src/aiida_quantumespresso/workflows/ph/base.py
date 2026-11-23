@@ -144,7 +144,7 @@ class PhBaseWorkChain(ProtocolMixin, BaseRestartWorkChain):
         if isinstance(code, str):
             code = orm.load_code(code)
 
-        type_check(code, orm.AbstractCode)
+        type_check(code, orm.Code)
         type_check(electronic_type, ElectronicType)
 
         if electronic_type not in [ElectronicType.METAL, ElectronicType.INSULATOR]:
